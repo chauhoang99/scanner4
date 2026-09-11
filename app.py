@@ -6,7 +6,7 @@ import streamlit as st
 import yfinance as yf
 
 # Page Configuration
-st.set_page_config(page_title="Candle Structure Probability Tracker", layout="wide")
+st.set_page_config(page_title="", layout="wide")
 
 # Custom Styling
 st.markdown(
