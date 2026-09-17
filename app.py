@@ -52,7 +52,7 @@ if st.sidebar.button("🔄 Run Analysis"):
     st.rerun()
 
 # ---------------------------------------------------------
-# CORE LOGIC: CANDLE STRUCTURE STATES
+# CORE LOGIC: STRAT CANDLE STRUCTURE STATES
 # ---------------------------------------------------------
 @st.cache_data(ttl=300)
 def fetch_data(ticker, period, interval):
@@ -78,12 +78,23 @@ def get_candle_structure_series(df):
         h_curr = df["High"].iloc[i]
         l_curr = df["Low"].iloc[i]
         
-        # Determine High relationship
-        h_rel = "HH" if h_curr > h_prev else "LH"
-        # Determine Low relationship
-        l_rel = "HL" if l_curr > l_prev else "LL"
+        higher_high = h_curr > h_prev
+        higher_low = l_curr > l_prev
         
-        state = f"{h_rel} - {l_rel}"
+        # The Strat Candle Classification:
+        # 1  = Inside Bar
+        # 2U = Directional Up Bar
+        # 2D = Directional Down Bar
+        # 3  = Outside Bar
+        if higher_high and higher_low:
+            state = "2U"
+        elif not higher_high and not higher_low:
+            state = "2D"
+        elif not higher_high and higher_low:
+            state = "1"
+        else:  # higher_high and not higher_low
+            state = "3"
+            
         states.append(state)
         dates.append(df.index[i])
         
@@ -150,7 +161,7 @@ def get_all_patterns_summary(state_df, n_back=3):
 # MAIN DASHBOARD UI
 # ---------------------------------------------------------
 st.title("📈 Candle Structure Probability Tracker")
-st.markdown(f"Tracking High/Low structural transitions (HH/LH - HL/LL) for **{symbol}** on timeframe **{timeframe}**.")
+st.markdown(f"Tracking Strat candle structure transitions (1, 2U, 2D, 3) for **{symbol}** on timeframe **{timeframe}**.")
 
 # Fetch Data
 df = fetch_data(symbol, history_period, timeframe)
