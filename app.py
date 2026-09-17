@@ -6,7 +6,7 @@ import streamlit as st
 import yfinance as yf
 
 # Page Configuration
-st.set_page_config(page_title="", layout="wide")
+st.set_page_config(page_title="Strat Candle Tracker", layout="wide")
 
 # Custom Styling
 st.markdown(
@@ -45,6 +45,12 @@ timeframe = st.sidebar.selectbox("Timeframe", ["60m", "1d", "1wk", "1mo", "3mo"]
 history_period = st.sidebar.selectbox("History Range", ["1y", "2y", "5y", "10y", "max"], index=1)
 
 lookback_n = st.sidebar.slider("Pattern Lookback Window (Candles)", min_value=1, max_value=5, value=3, help="Number of past consecutive candle structures to match historically.")
+
+include_live_bar = st.sidebar.checkbox(
+    "Include Live (Unclosed) Candle", 
+    value=False, 
+    help="When unchecked, the current forming bar is excluded so patterns are strictly built on fully closed candles."
+)
 
 show_all_patterns = st.sidebar.checkbox("Show All Historical Patterns Summary", value=False)
 
@@ -160,15 +166,23 @@ def get_all_patterns_summary(state_df, n_back=3):
 # ---------------------------------------------------------
 # MAIN DASHBOARD UI
 # ---------------------------------------------------------
-st.title("📈 Candle Structure Probability Tracker")
-st.markdown(f"Tracking Strat candle structure transitions (1, 2U, 2D, 3) for **{symbol}** on timeframe **{timeframe}**.")
+st.title("📈 Strat Candle Probability Tracker")
+
+status_label = "Live Candle Included" if include_live_bar else "Closed Candles Only"
+st.markdown(f"Tracking Strat candle structure transitions (**1, 2U, 2D, 3**) for **{symbol}** on timeframe **{timeframe}** (`{status_label}`).")
 
 # Fetch Data
-df = fetch_data(symbol, history_period, timeframe)
+raw_df = fetch_data(symbol, history_period, timeframe)
 
-if df is None or df.empty:
+if raw_df is None or raw_df.empty:
     st.error(f"Could not retrieve data for ticker '{symbol}'. Please check the symbol and try again.")
 else:
+    df = raw_df.copy()
+    
+    # Exclude active unclosed candle if toggle is disabled
+    if not include_live_bar and len(df) > 1:
+        df = df.iloc[:-1]
+
     state_history = get_candle_structure_series(df)
     
     if state_history.empty:
