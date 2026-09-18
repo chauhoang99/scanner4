@@ -246,18 +246,13 @@ def calculate_next_state_probabilities(state_df, htf_df=None, n_back=3, use_htf_
     return current_pattern, probabilities, total_matches, current_htf_context
 
 def calculate_aggregate_probabilities(probabilities):
-    """
-    Aggregates granular probabilities into:
-    1. Total Up Probability vs Total Down Probability
-    2. Structural Breakdown (2U, 2D, 1, 3)
-    """
+
     up_prob = 0.0
     down_prob = 0.0
     
     struct_probs = {"2U (Up)": 0.0, "2D (Down)": 0.0, "1 (Inside)": 0.0, "3 (Outside)": 0.0}
 
     for state, prob in probabilities.items():
-        # Structural Type Breakdown
         if state.startswith("2U"):
             struct_probs["2U (Up)"] += prob
             up_prob += prob
@@ -288,32 +283,60 @@ def calculate_aggregate_probabilities(probabilities):
 
     return dir_df, struct_df
 
-def get_all_patterns_summary(state_df, n_back=3):
+def get_all_patterns_summary(state_df, htf_df=None, n_back=3, use_htf_context=True):
     if state_df.empty or len(state_df) <= n_back:
         return pd.DataFrame()
 
-    states = state_df['State'].tolist()
+    df_merged = state_df.sort_values("Date").copy()
+    has_htf = False
+
+    if use_htf_context and htf_df is not None and not htf_df.empty:
+        df_merged = pd.merge_asof(
+            df_merged,
+            htf_df.sort_values("Date"),
+            on="Date",
+            direction="backward",
+            suffixes=("", "_HTF")
+        )
+        if "State_HTF" in df_merged.columns:
+            has_htf = True
+
+    states = df_merged['State'].tolist()
+    htf_states = df_merged['State_HTF'].tolist() if has_htf else ["N/A"] * len(states)
+
     pattern_transitions = defaultdict(list)
 
     for i in range(len(states) - n_back):
         window = tuple(states[i:i+n_back])
-        pattern_transitions[window].append(states[i+n_back])
+        context = htf_states[i + n_back - 1]
+        next_state = states[i + n_back]
+        
+        pattern_transitions[(context, window)].append(next_state)
 
     summary_data = []
-    for pattern, subsequent in pattern_transitions.items():
+    for (context, pattern), subsequent in pattern_transitions.items():
         total_occurrences = len(subsequent)
         counts = Counter(subsequent)
         most_common_next, most_common_count = counts.most_common(1)[0]
         most_common_pct = (most_common_count / total_occurrences) * 100
 
-        summary_data.append({
+        row = {}
+        if use_htf_context:
+            row["HTF Context"] = context
+
+        row.update({
             "Pattern Sequence": " ➔ ".join(pattern),
             "Total Sample Occurrences": total_occurrences,
             "Most Common Next Structure": most_common_next,
             "Probability": f"{most_common_pct:.1f}%"
         })
 
-    return pd.DataFrame(summary_data).sort_values(by="Total Sample Occurrences", ascending=False)
+        summary_data.append(row)
+
+    res_df = pd.DataFrame(summary_data)
+    if not res_df.empty:
+        return res_df.sort_values(by="Total Sample Occurrences", ascending=False)
+    return res_df
 
 # ---------------------------------------------------------
 # MAIN DASHBOARD UI
@@ -413,8 +436,13 @@ else:
 
         if show_all_patterns:
             st.markdown("---")
-            st.subheader("📋 All Historical Structure Patterns Summary")
-            all_summary_df = get_all_patterns_summary(state_history, lookback_n)
+            st.subheader(f"📋 All Historical Structure Patterns Summary (HTF: {htf_timeframe})")
+            all_summary_df = get_all_patterns_summary(
+                state_history, 
+                htf_state_history, 
+                lookback_n, 
+                use_htf_context=filter_by_htf
+            )
             if not all_summary_df.empty:
                 st.dataframe(all_summary_df, use_container_width=True, hide_index=True)
 
