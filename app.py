@@ -245,6 +245,49 @@ def calculate_next_state_probabilities(state_df, htf_df=None, n_back=3, use_htf_
 
     return current_pattern, probabilities, total_matches, current_htf_context
 
+def calculate_aggregate_probabilities(probabilities):
+    """
+    Aggregates granular probabilities into:
+    1. Total Up Probability vs Total Down Probability
+    2. Structural Breakdown (2U, 2D, 1, 3)
+    """
+    up_prob = 0.0
+    down_prob = 0.0
+    
+    struct_probs = {"2U (Up)": 0.0, "2D (Down)": 0.0, "1 (Inside)": 0.0, "3 (Outside)": 0.0}
+
+    for state, prob in probabilities.items():
+        # Structural Type Breakdown
+        if state.startswith("2U"):
+            struct_probs["2U (Up)"] += prob
+            up_prob += prob
+        elif state.startswith("2D"):
+            struct_probs["2D (Down)"] += prob
+            down_prob += prob
+        elif state.startswith("1"):
+            struct_probs["1 (Inside)"] += prob
+            if "↑" in state:
+                up_prob += prob
+            else:
+                down_prob += prob
+        elif state.startswith("3"):
+            struct_probs["3 (Outside)"] += prob
+            if "↑" in state:
+                up_prob += prob
+            else:
+                down_prob += prob
+
+    dir_df = pd.DataFrame([
+        {"Direction": "Total Up Probability", "Probability (%)": round(up_prob, 2)},
+        {"Direction": "Total Down Probability", "Probability (%)": round(down_prob, 2)}
+    ])
+
+    struct_df = pd.DataFrame([
+        {"Structure": k, "Probability (%)": round(v, 2)} for k, v in struct_probs.items()
+    ])
+
+    return dir_df, struct_df
+
 def get_all_patterns_summary(state_df, n_back=3):
     if state_df.empty or len(state_df) <= n_back:
         return pd.DataFrame()
@@ -343,11 +386,28 @@ else:
 
             c1, c2 = st.columns([1, 1])
             with c1:
-                st.markdown("##### Probability Table")
+                st.markdown("##### Detailed States Table")
                 st.dataframe(prob_df[["Next Candle Structure", "Probability (Fraction)"]], use_container_width=True, hide_index=True)
             with c2:
-                st.markdown("##### Visual Distribution")
+                st.markdown("##### Detailed States Distribution")
                 st.bar_chart(prob_df.set_index("Next Candle Structure")["Probability (%)"])
+
+            st.markdown("---")
+            st.subheader("🎯 Aggregate Direction & Structure Distribution")
+
+            dir_df, struct_df = calculate_aggregate_probabilities(probabilities)
+
+            ac1, ac2 = st.columns(2)
+            with ac1:
+                st.markdown("##### Total Up vs. Total Down Direction")
+                st.dataframe(dir_df, use_container_width=True, hide_index=True)
+                st.bar_chart(dir_df.set_index("Direction")["Probability (%)"])
+
+            with ac2:
+                st.markdown("##### Strat Structure Type Breakdown (2U / 2D / 1 / 3)")
+                st.dataframe(struct_df, use_container_width=True, hide_index=True)
+                st.bar_chart(struct_df.set_index("Structure")["Probability (%)"])
+
         else:
             st.warning(f"⚠️ No historical matches found for this exact structural sequence under the active {htf_timeframe} context.")
 
