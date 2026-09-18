@@ -86,6 +86,11 @@ else:
     history_period = st.sidebar.selectbox("History Range", ["1y", "2y", "5y", "10y", "max"], index=1)
     sample_count = 1000
 
+failed_method = st.sidebar.selectbox(
+    "Failed 2 Method", ["Reclaim", "Open", "Both", "Either"], index=0,
+    help="Reclaim = Close back inside range. Open = Counter-color close."
+)
+
 lookback_n = st.sidebar.slider("Pattern Lookback Window (Candles)", min_value=1, max_value=5, value=3, help="Number of past consecutive candle structures to match historically.")
 include_live_bar = st.sidebar.checkbox("Include Live (Unclosed) Candle", value=False, help="When unchecked, current forming bar is excluded.")
 show_all_patterns = st.sidebar.checkbox("Show All Historical Patterns Summary", value=False)
@@ -136,9 +141,9 @@ def fetch_yf_data(ticker, period, interval):
         return None
 
 # ---------------------------------------------------------
-# STRAT CANDLE CLASSIFICATION WITH EXACT DIRECTION SYMBOLS
+# STRAT CANDLE CLASSIFICATION ENGINE
 # ---------------------------------------------------------
-def get_candle_structure_series(df):
+def get_candle_structure_series(df, method="Reclaim"):
     if df is None or len(df) < 2:
         return pd.DataFrame()
 
@@ -156,27 +161,58 @@ def get_candle_structure_series(df):
         higher_high = h_curr > h_prev
         lower_low = l_curr < l_prev
 
-        # Strat Candle Classification:
-        # 1        = Inside Bar
-        # 2U ↑ ▲   = 2-Up Successful (Closes Green / Above Prev High)
-        # 2U F ↓ ▼ = 2-Up Failed (Triggers 2-Up but closes Red / Back Inside)
-        # 2D ↓ ▼   = 2-Down Successful (Closes Red / Below Prev Low)
-        # 2D F ↑ ▲ = 2-Down Failed (Triggers 2-Down but closes Green / Back Inside)
-        # 3        = Outside Bar
-        if higher_high and lower_low:
-            state = "3"
-        elif higher_high and not lower_low:
-            if c_curr < h_prev or c_curr < o_curr:
-                state = "2U F ↓ ▼"
-            else:
-                state = "2U ↑ ▲"
-        elif not higher_high and lower_low:
-            if c_curr > l_prev or c_curr > o_curr:
-                state = "2D F ↑ ▲"
-            else:
-                state = "2D ↓ ▼"
+        # 1. Line Arrow = Candle Color Direction (Close vs Open)
+        arrow = "↑" if c_curr >= o_curr else "↓"
+
+        # 2. In-Force Status & Solid Triangle (Outside Prior Range & NOT Reclaimed)
+        in_force_up = c_curr > h_prev
+        in_force_dn = c_curr < l_prev
+
+        if in_force_up:
+            triangle = "▲"
+        elif in_force_dn:
+            triangle = "▼"
         else:
-            state = "1"
+            triangle = ""
+
+        # 3. Failed Bar Conditions
+        not_above_open = c_curr < o_curr
+        above_open = c_curr > o_curr
+        reclaimed_2u = c_curr <= h_prev
+        reclaimed_2d = c_curr >= l_prev
+
+        if method == "Open":
+            is_f2u, is_f2d = not_above_open, above_open
+        elif method == "Reclaim":
+            is_f2u, is_f2d = reclaimed_2u, reclaimed_2d
+        elif method == "Both":
+            is_f2u = not_above_open and reclaimed_2u
+            is_f2d = above_open and reclaimed_2d
+        else:  # "Either"
+            is_f2u = not_above_open or reclaimed_2u
+            is_f2d = above_open or reclaimed_2d
+
+        # 4. Strat Classification Hierarchy
+        if higher_high and lower_low:
+            dir_tag = f"{arrow} {triangle}".strip()
+            state = f"3 {dir_tag}"
+        elif higher_high and not lower_low:
+            if is_f2u:
+                dir_tag = f"{arrow} {triangle}".strip() if in_force_up else arrow
+                state = f"2U F {dir_tag}"
+            else:
+                dir_tag = f"{arrow} {triangle}".strip()
+                state = f"2U {dir_tag}"
+        elif not higher_high and lower_low:
+            if is_f2d:
+                dir_tag = f"{arrow} {triangle}".strip() if in_force_dn else arrow
+                state = f"2D F {dir_tag}"
+            else:
+                dir_tag = f"{arrow} {triangle}".strip()
+                state = f"2D {dir_tag}"
+        else:
+            # Inside Bar (1) - Color direction only, no solid triangle
+            state = f"1 {arrow}"
 
         states.append(state)
         dates.append(df.index[i])
@@ -256,7 +292,7 @@ else:
         else:
             df = df.iloc[:-1]
 
-    state_history = get_candle_structure_series(df)
+    state_history = get_candle_structure_series(df, method=failed_method)
 
     if state_history.empty:
         st.warning("Not enough historical data points to generate candle structures.")
@@ -264,7 +300,7 @@ else:
         current_pattern, probabilities, total_matches = calculate_next_state_probabilities(state_history, lookback_n)
 
         status_label = "Live Candle Included" if include_live_bar else "Closed Candles Only"
-        st.markdown(f"Tracking Strat candle structure transitions (**1, 2U ↑ ▲, 2U F ↓ ▼, 2D ↓ ▼, 2D F ↑ ▲, 3**) for **{symbol}** on timeframe **{timeframe}** (`{status_label}`).")
+        st.markdown(f"Tracking Strat candle structure transitions for **{symbol}** on timeframe **{timeframe}** (`{status_label}`).")
 
         col1, col2, col3 = st.columns(3)
         with col1:
