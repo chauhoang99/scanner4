@@ -76,14 +76,15 @@ symbol = st.sidebar.selectbox("Ticker Symbol", options=ticker_options, index=0, 
 st.sidebar.subheader("Timeframes & History")
 
 granularity_map = {
-    "60m": "H1", "1d": "D", "1wk": "W", "1mo": "M"
+    "15m": "M15", "60m": "H1", "1d": "D", "1wk": "W", "1mo": "M"
 }
 
-# Configurable Execution Timeframe
-timeframe = st.sidebar.selectbox("Execution Timeframe", ["60m", "1d", "1wk"], index=1)
+# Configurable Execution Timeframe (Includes 15m)
+timeframe = st.sidebar.selectbox("Execution Timeframe", ["15m", "60m", "1d", "1wk"], index=2)
 
 # Dynamically map valid Higher Timeframes based on selected Execution Timeframe
 htf_options_map = {
+    "15m": ["60m", "1d", "1wk", "1mo"],
     "60m": ["1d", "1wk", "1mo"],
     "1d": ["1wk", "1mo"],
     "1wk": ["1mo"]
@@ -94,7 +95,11 @@ if data_source == "OANDA API":
     sample_count = st.sidebar.slider("Historical Candle Count", 100, 4000, 1000, step=100)
     history_period = "2y"
 else:
-    history_period = st.sidebar.selectbox("History Range", ["1y", "2y", "5y", "10y", "max"], index=1)
+    # Yahoo Finance limits intraday intervals (15m) to a maximum of 60 days
+    if timeframe == "15m":
+        history_period = st.sidebar.selectbox("History Range", ["5d", "1mo", "60d"], index=2)
+    else:
+        history_period = st.sidebar.selectbox("History Range", ["1y", "2y", "5y", "10y", "max"], index=1)
     sample_count = 1000
 
 lookback_n = st.sidebar.slider("Pattern Lookback Window (Candles)", min_value=1, max_value=5, value=3, help="Number of past consecutive candle structures to match historically.")
@@ -246,7 +251,6 @@ def calculate_next_state_probabilities(state_df, htf_df=None, n_back=3, use_htf_
     return current_pattern, probabilities, total_matches, current_htf_context
 
 def calculate_aggregate_probabilities(probabilities):
-
     up_prob = 0.0
     down_prob = 0.0
     
