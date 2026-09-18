@@ -79,14 +79,14 @@ if data_source == "OANDA API":
         "60m": "H1", "1d": "D", "1wk": "W", "1mo": "M"
     }
     timeframe = st.sidebar.selectbox("Timeframe", ["60m", "1d", "1wk", "1mo"], index=1)
-    sample_count = st.sidebar.slider("Historical Candle Count", 100, 4000, 1000, step=100)
+    sample_count = st.sidebar.slider("Historical Candle Count", 100, 4000, 4000, step=100)
     history_period = "2y"
 else:
     timeframe = st.sidebar.selectbox("Timeframe", ["60m", "1d", "1wk", "1mo", "3mo"], index=1)
     history_period = st.sidebar.selectbox("History Range", ["1y", "2y", "5y", "10y", "max"], index=1)
     sample_count = 1000
 
-lookback_n = st.sidebar.slider("Pattern Lookback Window (Candles)", min_value=1, max_value=5, value=3, help="Number of past consecutive candle structures to match historically.")
+lookback_n = st.sidebar.slider("Pattern Lookback Window (Candles)", min_value=1, max_value=5, value=2, help="Number of past consecutive candle structures to match historically.")
 include_live_bar = st.sidebar.checkbox("Include Live (Unclosed) Candle", value=False, help="When unchecked, current forming bar is excluded.")
 show_all_patterns = st.sidebar.checkbox("Show All Historical Patterns Summary", value=False)
 
