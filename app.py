@@ -73,22 +73,33 @@ ticker_mapping = {
 ticker_options = list(ticker_mapping.keys())
 symbol = st.sidebar.selectbox("Ticker Symbol", options=ticker_options, index=0, help="Select a ticker symbol from the list.")
 
-st.sidebar.subheader("Timeframe & History")
+st.sidebar.subheader("Timeframes & History")
+
+granularity_map = {
+    "60m": "H1", "1d": "D", "1wk": "W", "1mo": "M"
+}
+
+# Configurable Execution Timeframe
+timeframe = st.sidebar.selectbox("Execution Timeframe", ["60m", "1d", "1wk"], index=1)
+
+# Dynamically map valid Higher Timeframes based on selected Execution Timeframe
+htf_options_map = {
+    "60m": ["1d", "1wk", "1mo"],
+    "1d": ["1wk", "1mo"],
+    "1wk": ["1mo"]
+}
+htf_timeframe = st.sidebar.selectbox("Higher Timeframe (Context)", htf_options_map[timeframe], index=0)
+
 if data_source == "OANDA API":
-    granularity_map = {
-        "60m": "H1", "1d": "D", "1wk": "W"
-    }
-    timeframe = st.sidebar.selectbox("Execution Timeframe", ["60m", "1d"], index=1)
-    sample_count = st.sidebar.slider("Historical Candle Count", 100, 4000, 4000, step=100)
+    sample_count = st.sidebar.slider("Historical Candle Count", 100, 4000, 1000, step=100)
     history_period = "2y"
 else:
-    timeframe = st.sidebar.selectbox("Execution Timeframe", ["60m", "1d"], index=1)
     history_period = st.sidebar.selectbox("History Range", ["1y", "2y", "5y", "10y", "max"], index=1)
     sample_count = 1000
 
-lookback_n = st.sidebar.slider("Pattern Lookback Window (Candles)", min_value=1, max_value=5, value=2, help="Number of past consecutive candle structures to match historically.")
+lookback_n = st.sidebar.slider("Pattern Lookback Window (Candles)", min_value=1, max_value=5, value=3, help="Number of past consecutive candle structures to match historically.")
 include_live_bar = st.sidebar.checkbox("Include Live (Unclosed) Candle", value=False, help="When unchecked, current forming bar is excluded.")
-filter_by_weekly = st.sidebar.checkbox("Filter Probabilities by Active Weekly Context", value=True, help="Only match patterns that occurred under the same Weekly Strat candle state.")
+filter_by_htf = st.sidebar.checkbox(f"Filter Probabilities by Active HTF ({htf_timeframe}) Context", value=True, help="Only match patterns that occurred under the same Higher Timeframe Strat candle state.")
 show_all_patterns = st.sidebar.checkbox("Show All Historical Patterns Summary", value=False)
 
 if st.sidebar.button("🔄 Run Analysis"):
@@ -186,26 +197,26 @@ def get_candle_structure_series(df):
 
     return pd.DataFrame({'Date': pd.to_datetime(dates), 'State': states})
 
-def calculate_next_state_probabilities(state_df, weekly_df=None, n_back=3, use_weekly_context=True):
+def calculate_next_state_probabilities(state_df, htf_df=None, n_back=3, use_htf_context=True):
     if state_df.empty or len(state_df) <= n_back:
         return [], {}, 0, "N/A"
 
     df_merged = state_df.sort_values("Date").copy()
 
-    current_weekly_context = "N/A"
-    if use_weekly_context and weekly_df is not None and not weekly_df.empty:
+    current_htf_context = "N/A"
+    if use_htf_context and htf_df is not None and not htf_df.empty:
         df_merged = pd.merge_asof(
             df_merged,
-            weekly_df.sort_values("Date"),
+            htf_df.sort_values("Date"),
             on="Date",
             direction="backward",
-            suffixes=("", "_Weekly")
+            suffixes=("", "_HTF")
         )
-        if "State_Weekly" in df_merged.columns:
-            current_weekly_context = df_merged["State_Weekly"].iloc[-1]
+        if "State_HTF" in df_merged.columns:
+            current_htf_context = df_merged["State_HTF"].iloc[-1]
 
     states = df_merged['State'].tolist()
-    weekly_states = df_merged['State_Weekly'].tolist() if "State_Weekly" in df_merged.columns else []
+    htf_states = df_merged['State_HTF'].tolist() if "State_HTF" in df_merged.columns else []
     
     current_pattern = states[-n_back:]
 
@@ -213,26 +224,26 @@ def calculate_next_state_probabilities(state_df, weekly_df=None, n_back=3, use_w
     for i in range(len(states) - n_back):
         window = states[i:i+n_back]
         
-        # Condition check: Match LTF pattern AND matching Weekly Context (if enabled)
+        # Condition check: Match LTF pattern AND matching HTF Context (if enabled)
         pattern_match = (window == current_pattern)
         context_match = True
         
-        if use_weekly_context and current_weekly_context != "N/A" and weekly_states:
-            context_at_time = weekly_states[i + n_back - 1]
-            context_match = (context_at_time == current_weekly_context)
+        if use_htf_context and current_htf_context != "N/A" and htf_states:
+            context_at_time = htf_states[i + n_back - 1]
+            context_match = (context_at_time == current_htf_context)
 
         if pattern_match and context_match:
             if i + n_back < len(states):
                 next_states.append(states[i+n_back])
 
     if not next_states:
-        return current_pattern, {}, 0, current_weekly_context
+        return current_pattern, {}, 0, current_htf_context
 
     total_matches = len(next_states)
     counts = Counter(next_states)
     probabilities = {s: (c / total_matches) * 100 for s, c in sorted(counts.items(), key=lambda x: x[1], reverse=True)}
 
-    return current_pattern, probabilities, total_matches, current_weekly_context
+    return current_pattern, probabilities, total_matches, current_htf_context
 
 def get_all_patterns_summary(state_df, n_back=3):
     if state_df.empty or len(state_df) <= n_back:
@@ -271,16 +282,16 @@ if data_source == "OANDA API":
         st.warning("⚠️ OANDA API token missing. Please enter it in the sidebar or switch data source to Yahoo Finance.")
         st.stop()
     raw_df = fetch_oanda_data(symbol, granularity_map.get(timeframe, "D"), sample_count, api_token, oanda_env)
-    raw_weekly_df = fetch_oanda_data(symbol, "W", max(100, int(sample_count / 5)), api_token, oanda_env)
+    raw_htf_df = fetch_oanda_data(symbol, granularity_map.get(htf_timeframe, "W"), max(100, int(sample_count / 5)), api_token, oanda_env)
 else:
     raw_df = fetch_yf_data(symbol, history_period, timeframe)
-    raw_weekly_df = fetch_yf_data(symbol, history_period, "1wk")
+    raw_htf_df = fetch_yf_data(symbol, history_period, htf_timeframe)
 
 if raw_df is None or raw_df.empty:
     st.error(f"Could not retrieve data for '{symbol}'. Please check your token or symbol configuration.")
 else:
     df = raw_df.copy()
-    weekly_df = raw_weekly_df.copy() if raw_weekly_df is not None else None
+    htf_df = raw_htf_df.copy() if raw_htf_df is not None else None
 
     if not include_live_bar:
         if len(df) > 1:
@@ -288,23 +299,23 @@ else:
                 df = df[df["Complete"] == True]
             else:
                 df = df.iloc[:-1]
-        if weekly_df is not None and len(weekly_df) > 1:
-            if "Complete" in weekly_df.columns:
-                weekly_df = weekly_df[weekly_df["Complete"] == True]
+        if htf_df is not None and len(htf_df) > 1:
+            if "Complete" in htf_df.columns:
+                htf_df = htf_df[htf_df["Complete"] == True]
             else:
-                weekly_df = weekly_df.iloc[:-1]
+                htf_df = htf_df.iloc[:-1]
 
     state_history = get_candle_structure_series(df)
-    weekly_state_history = get_candle_structure_series(weekly_df) if weekly_df is not None else pd.DataFrame()
+    htf_state_history = get_candle_structure_series(htf_df) if htf_df is not None else pd.DataFrame()
 
     if state_history.empty:
         st.warning("Not enough historical data points to generate candle structures.")
     else:
-        current_pattern, probabilities, total_matches, weekly_context = calculate_next_state_probabilities(
+        current_pattern, probabilities, total_matches, htf_context = calculate_next_state_probabilities(
             state_history, 
-            weekly_state_history, 
+            htf_state_history, 
             lookback_n, 
-            use_weekly_context=filter_by_weekly
+            use_htf_context=filter_by_htf
         )
 
         status_label = "Live Candle Included" if include_live_bar else "Closed Candles Only"
@@ -316,13 +327,13 @@ else:
         with col2:
             st.metric("Current Pattern Sequence", " ➔ ".join(current_pattern))
         with col3:
-            st.metric("Active Weekly Context", weekly_context)
+            st.metric(f"Active HTF ({htf_timeframe}) Context", htf_context)
         with col4:
             st.metric("Sample Size (Matching Occurrences)", total_matches)
 
         st.markdown("---")
         
-        context_msg = f" (Filtered by Active Weekly Context: **{weekly_context}**)" if (filter_by_weekly and weekly_context != "N/A") else ""
+        context_msg = f" (Filtered by Active HTF [{htf_timeframe}]: **{htf_context}**)" if (filter_by_htf and htf_context != "N/A") else ""
         st.subheader(f"📊 Next Candle Structure Probability Breakdown{context_msg}")
 
         if total_matches > 0:
@@ -338,7 +349,7 @@ else:
                 st.markdown("##### Visual Distribution")
                 st.bar_chart(prob_df.set_index("Next Candle Structure")["Probability (%)"])
         else:
-            st.warning("⚠️ No historical matches found for this exact structural sequence under the active Weekly context.")
+            st.warning(f"⚠️ No historical matches found for this exact structural sequence under the active {htf_timeframe} context.")
 
         if show_all_patterns:
             st.markdown("---")
