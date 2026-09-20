@@ -904,7 +904,6 @@ def scan_one_symbol(
     htf_input2: str,
     use_offset: bool,
     lookback_n: int,
-    max_history: int,
     filter_htf: bool,
     filter_htf2: bool,
     filter_sr: bool,
@@ -928,6 +927,10 @@ def scan_one_symbol(
         token, account_id, environment, symbol, granularity, history_bars,
         daily_alignment, alignment_timezone, weekly_alignment, "M"
     ).reset_index(drop=True)
+
+    # Automatically use all eligible history that was actually loaded.
+    # One endpoint is reserved for the current pattern and its following-bar logic.
+    max_history = max(0, len(base) - 1)
 
     # Fast path: no S/R. This is the common scanner case.
     if not filter_sr:
@@ -1110,7 +1113,6 @@ def main():
         )
 
         lookback_n = st.slider("Pattern Lookback Window (Candles)", 1, 5, 3)
-        max_history = st.slider("Historical Lookback Bars", 100, 5000, 4600, step=100)
 
         st.divider()
         st.header("Context Filters")
@@ -1257,7 +1259,6 @@ def main():
                 htf_input2,
                 use_offset,
                 int(lookback_n),
-                int(max_history),
                 filter_htf,
                 filter_htf2,
                 filter_sr,
