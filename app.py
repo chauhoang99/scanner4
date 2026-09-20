@@ -150,17 +150,21 @@ def fetch_yf_data(ticker, period, interval):
         return None
 
 # ---------------------------------------------------------
-# PINE SCRIPT MATCHED STRAT CANDLE CLASSIFICATION ENGINE
+# PINE SCRIPT STRAT CANDLE ENGINE
 # ---------------------------------------------------------
 def get_candle_structure_series(df):
     """
-    Classifies candles strictly using Pine Script Strat rules:
-    - 1: Inside Bar (High <= Prev High and Low >= Prev Low)
-    - 2U: Directional Up (High > Prev High and Low >= Prev Low)
-    - 2D: Directional Down (High <= Prev High and Low < Prev Low)
-    - 3: Outside Bar (High > Prev High and Low < Prev Low)
-    
-    Includes directional arrow (↑/↓) and Pine Script in-force breakout status (▲/▼).
+    Classifies candles using strict Pine Script Strat logic:
+    - Type 1  (Inside Bar):  High <= Prev High and Low >= Prev Low
+    - Type 2U (Up):          High >  Prev High and Low >= Prev Low
+    - Type 2D (Down):        High <= Prev High and Low <  Prev Low
+    - Type 3  (Outside Bar): High >  Prev High and Low <  Prev Low
+
+    Direction:
+    - ↑: Bullish / Green (Close >= Open)
+    - ↓: Bearish / Red   (Close < Open)
+
+    Formatted Output Example: "2U ↑", "1 ↓", "3 ↑", "2D ↓"
     """
     if df is None or len(df) < 2:
         return pd.DataFrame()
@@ -180,7 +184,7 @@ def get_candle_structure_series(df):
         higher_high = h_curr > h_prev
         lower_low = l_curr < l_prev
 
-        # 1. Strat Candle Structure Type (Pine Script Standard)
+        # 1. Structure Type Classification
         if higher_high and lower_low:
             num = "3"
         elif higher_high and not lower_low:
@@ -190,19 +194,11 @@ def get_candle_structure_series(df):
         else:
             num = "1"
 
-        # 2. Candle Color Direction (Close vs Open)
+        # 2. Candle Direction (Green vs Red)
         arrow = "↑" if c_curr >= o_curr else "↓"
 
-        # 3. Pine Script In-Force Trigger Status
-        if c_curr > h_prev:
-            triangle = "▲"  # Bullish In-Force (Closed above prior high)
-        elif c_curr < l_prev:
-            triangle = "▼"  # Bearish In-Force (Closed below prior low)
-        else:
-            triangle = ""
-
-        # Composite State Format: [Type] [Arrow] [Triangle]
-        state = f"{num} {arrow} {triangle}".strip()
+        # State string matching Pine Script output: e.g., "2U ↑"
+        state = f"{num} {arrow}"
 
         states.append(state)
         dates.append(df.index[i])
