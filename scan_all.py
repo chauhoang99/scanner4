@@ -748,20 +748,20 @@ def _fast_strat_states(df: pd.DataFrame) -> np.ndarray:
 
     mask3 = outside
     normal3 = mask3 & ~hammer & ~shooter
-    state[normal3] = np.char.add(np.full(normal3.sum(), "3", dtype=str), color[normal3])
+    state[normal3] = np.where(green[normal3], "3G", "3R")
     state[mask3 & hammer] = "3-H"
     state[mask3 & shooter] = "3-SS"
 
     # Preserve 2U / 2D for ordinary Type-2 candles.
     mask2u = two_up
     normal2u = mask2u & ~hammer & ~shooter
-    state[normal2u] = np.char.add(np.full(normal2u.sum(), "2U", dtype=str), color[normal2u])
+    state[normal2u] = np.where(green[normal2u], "2UG", "2UR")
     state[mask2u & hammer] = "2-H"
     state[mask2u & shooter] = "2-SS"
 
     mask2d = two_down
     normal2d = mask2d & ~hammer & ~shooter
-    state[normal2d] = np.char.add(np.full(normal2d.sum(), "2D", dtype=str), color[normal2d])
+    state[normal2d] = np.where(green[normal2d], "2DG", "2DR")
     state[mask2d & hammer] = "2-H"
     state[mask2d & shooter] = "2-SS"
 
@@ -893,6 +893,19 @@ def _fast_prediction(
     }
 
 
+
+def _assert_directional_type2(value: str, where: str) -> str:
+    """Never allow obsolete ambiguous 2G/2R labels into the scanner table."""
+    s = str(value)
+    parts = [p.strip() for p in s.split("➔")] if "➔" in s else [s.strip()]
+    for p in parts:
+        if p in ("2G", "2R"):
+            raise RuntimeError(
+                f"Obsolete ambiguous Strat state {p!r} reached {where}; "
+                "expected 2UG/2UR/2DG/2DR."
+            )
+    return s
+
 def scan_one_symbol(
     token: str,
     account_id: str,
@@ -973,9 +986,12 @@ def scan_one_symbol(
 
         row = {
             "Symbol": symbol,
-            "Pattern": result["current_seq"],
+            "Pattern": _assert_directional_type2(result["current_seq"], "Pattern"),
             "Sample Size": result["total_matches"],
-            "Predicted Next Bar": result["highest_state"] if result["total_matches"] else "N/A",
+            "Predicted Next Bar": _assert_directional_type2(
+                result["highest_state"] if result["total_matches"] else "N/A",
+                "Predicted Next Bar",
+            ),
             "Next-Bar Probability": result["highest_prob"],
             "Bullish Probability": result["bull_prob"],
             "Candle Time": current_row["time"],
@@ -1040,9 +1056,12 @@ def scan_one_symbol(
 
     row = {
         "Symbol": symbol,
-        "Pattern": result["current_seq"],
+        "Pattern": _assert_directional_type2(result["current_seq"], "Pattern"),
         "Sample Size": result["total_matches"],
-        "Predicted Next Bar": result["highest_state"] if result["total_matches"] else "N/A",
+        "Predicted Next Bar": _assert_directional_type2(
+            result["highest_state"] if result["total_matches"] else "N/A",
+            "Predicted Next Bar",
+        ),
         "Next-Bar Probability": result["highest_prob"] if result["total_matches"] else None,
         "Bullish Probability": result["bull_prob"] if result["total_matches"] else None,
         "Candle Time": current_row["time"],
