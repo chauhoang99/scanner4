@@ -863,7 +863,7 @@ def main():
         )
 
         lookback_n = st.slider("Pattern Lookback Window (Candles)", 1, 5, 3)
-        max_history = st.slider("Historical Lookback Bars", 100, 5000, 5000, step=100)
+        max_history = st.slider("Historical Lookback Bars", 100, 5000, 4600, step=100)
 
         st.divider()
         st.header("Context Filters")
@@ -923,7 +923,7 @@ def main():
         st.divider()
         max_workers = st.slider(
             "Parallel Symbols",
-            1, 50, 50,
+            1, 50, 5,
             help="Lower this if OANDA returns rate-limit/network errors."
         )
 
@@ -942,8 +942,8 @@ def main():
             ],
         )
 
-        scan = st.button("Scan All OANDA Forex Symbols", type="primary", use_container_width=True)
-        refresh = st.button("Clear OANDA Cache", use_container_width=True)
+        scan = st.button("Scan All OANDA Forex Symbols", type="primary", width="stretch")
+        refresh = st.button("Clear OANDA Cache", width="stretch")
 
     if refresh:
         fetch_candles.clear()
@@ -1045,7 +1045,7 @@ def main():
     if not rows:
         st.error("The scan returned no successful symbol results.")
         if errors:
-            st.dataframe(pd.DataFrame(errors), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(errors).astype(str), hide_index=True, width="stretch")
         st.stop()
 
     result_df = pd.DataFrame(rows)
@@ -1087,7 +1087,7 @@ def main():
     st.dataframe(
         display_df,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         height=min(1000, 38 * (len(display_df) + 1)),
     )
 
@@ -1132,15 +1132,20 @@ def main():
                 ),
             ])
 
+            detail_df = pd.DataFrame(detail, columns=["Metric", "Value"])
+            detail_df["Metric"] = detail_df["Metric"].astype(str)
+            detail_df["Value"] = detail_df["Value"].map(
+                lambda x: "" if pd.isna(x) else str(x)
+            )
             st.dataframe(
-                pd.DataFrame(detail, columns=["Metric", "Value"]),
+                detail_df,
                 hide_index=True,
-                use_container_width=True,
+                width="stretch",
             )
 
     if errors:
         with st.expander(f"Scan errors ({len(errors)})"):
-            st.dataframe(pd.DataFrame(errors), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(errors).astype(str), hide_index=True, width="stretch")
 
 
 if __name__ == "__main__":
