@@ -697,6 +697,191 @@ def make_chart(df: pd.DataFrame, levels: List[Level], show_bars: int = 250) -> g
 
 
 
+def _fast_strat_states(df: pd.DataFrame) -> np.ndarray:
+    """Vectorized equivalent of the v5 LTF Strat state calculation."""
+    o = df["open"].to_numpy(dtype=float)
+    h = df["high"].to_numpy(dtype=float)
+    l = df["low"].to_numpy(dtype=float)
+    c = df["close"].to_numpy(dtype=float)
+    n = len(df)
+
+    out = np.full(n, "N/A", dtype=object)
+    if n < 2:
+        return out
+
+    ph = h[:-1]
+    pl = l[:-1]
+    ch = h[1:]
+    cl = l[1:]
+    co = o[1:]
+    cc = c[1:]
+
+    inside = (ch <= ph) & (cl >= pl)
+    outside = (ch > ph) & (cl < pl)
+    two_up = (ch > ph) & ~outside
+    two_down = (cl < pl) & ~outside
+
+    green = cc >= co
+    color = np.where(green, "G", "R")
+
+    body = np.abs(cc - co)
+    upper = ch - np.maximum(co, cc)
+    lower = np.minimum(co, cc) - cl
+
+    # Same hammer/shooter intent used by the original tracker.
+    hammer = (lower > body * 2.0) & (upper <= body)
+    shooter = (upper > body * 2.0) & (lower <= body)
+
+    state = np.empty(n - 1, dtype=object)
+    state[:] = "N/A"
+
+    state[inside] = np.char.add(np.full(inside.sum(), "1", dtype=str), color[inside])
+
+    mask3 = outside
+    normal3 = mask3 & ~hammer & ~shooter
+    state[normal3] = np.char.add(np.full(normal3.sum(), "3", dtype=str), color[normal3])
+    state[mask3 & hammer] = "3-H"
+    state[mask3 & shooter] = "3-SS"
+
+    mask2u = two_up & ~inside
+    normal2u = mask2u & ~hammer & ~shooter
+    state[normal2u] = np.char.add(np.full(normal2u.sum(), "2U", dtype=str), color[normal2u])
+    state[mask2u & hammer] = "2-H"
+    state[mask2u & shooter] = "2-SS"
+
+    mask2d = two_down & ~inside
+    normal2d = mask2d & ~hammer & ~shooter
+    state[normal2d] = np.char.add(np.full(normal2d.sum(), "2D", dtype=str), color[normal2d])
+    state[mask2d & hammer] = "2-H"
+    state[mask2d & shooter] = "2-SS"
+
+    out[1:] = state
+    return out
+
+
+def _bullish_state_fast(state: str) -> bool:
+    return state in ("2-H", "3-H") or str(state).endswith("G")
+
+
+def _align_state_fast(base_times: pd.Series, htf: pd.DataFrame) -> np.ndarray:
+    """Attach the latest available HTF Strat state to every LTF row."""
+    h = htf.copy()
+    h["strat_state_fast"] = _fast_strat_states(h)
+    left = pd.DataFrame({"time": pd.to_datetime(base_times, utc=True)})
+    right = h[["time", "strat_state_fast"]].copy().sort_values("time")
+    merged = pd.merge_asof(
+        left.sort_values("time"),
+        right,
+        on="time",
+        direction="backward",
+    )
+    return merged["strat_state_fast"].fillna("N/A").to_numpy(dtype=object)
+
+
+def _fast_prediction(
+    base: pd.DataFrame,
+    use_offset: bool,
+    lookback_n: int,
+    max_history: int,
+    filter_htf: bool,
+    htf1_states,
+    filter_htf2: bool,
+    htf2_states,
+    filter_dow: bool,
+    dow_shift_days: int,
+    filter_4h: bool,
+    filter_8h: bool,
+):
+    """Fast scanner-only pattern matcher.
+
+    It avoids thousands of pandas .loc/.iloc calls per symbol. Pattern matching
+    is performed on compact NumPy arrays. S/R remains on the original v5 path
+    because reproducing active S/R exactly requires its level engine.
+    """
+    states = _fast_strat_states(base)
+    n = len(states)
+    off = 1 if use_offset else 0
+    current_end = n - 1 - off
+    current_start = current_end - lookback_n + 1
+
+    if current_start < 1:
+        raise RuntimeError("Not enough candles for the selected pattern lookback.")
+
+    current_pattern = tuple(states[current_start:current_end + 1])
+    times = pd.to_datetime(base["time"], utc=True)
+
+    current_htf1 = str(htf1_states[current_end]) if filter_htf else None
+    current_htf2 = str(htf2_states[current_end]) if filter_htf2 else None
+
+    shifted_times = times + pd.to_timedelta(int(dow_shift_days), unit="D")
+    current_dow = shifted_times.iloc[current_end].day_name()
+
+    current_hour = int(times.iloc[current_end].hour)
+    current_sid4 = current_hour // 4
+    current_sid8 = current_hour // 8
+
+    latest_hist_end = current_end - 1
+    earliest_hist_end = max(lookback_n - 1, latest_hist_end - int(max_history) + 1)
+
+    matches = []
+    if latest_hist_end >= earliest_hist_end:
+        # Only a few thousand iterations, each operating directly on NumPy arrays.
+        # This is much cheaper than repeated DataFrame slicing/indexing.
+        for hist_end in range(earliest_hist_end, latest_hist_end + 1):
+            hist_start = hist_end - lookback_n + 1
+            if tuple(states[hist_start:hist_end + 1]) != current_pattern:
+                continue
+
+            if filter_htf and str(htf1_states[hist_end]) != current_htf1:
+                continue
+            if filter_htf2 and str(htf2_states[hist_end]) != current_htf2:
+                continue
+            if filter_dow and shifted_times.iloc[hist_end].day_name() != current_dow:
+                continue
+
+            hour = int(times.iloc[hist_end].hour)
+            if filter_4h and hour // 4 != current_sid4:
+                continue
+            if filter_8h and hour // 8 != current_sid8:
+                continue
+
+            next_idx = hist_end + 1
+            if next_idx <= current_end:
+                matches.append(str(states[next_idx]))
+
+    total = len(matches)
+    if total:
+        vals, counts = np.unique(np.asarray(matches, dtype=str), return_counts=True)
+        best_i = int(np.argmax(counts))
+        highest_state = str(vals[best_i])
+        highest_prob = float(counts[best_i] / total * 100.0)
+        bull_prob = float(
+            sum(_bullish_state_fast(x) for x in matches) / total * 100.0
+        )
+    else:
+        highest_state = "N/A"
+        highest_prob = None
+        bull_prob = None
+
+    return {
+        "current_end": current_end,
+        "current_seq": " ➔ ".join(str(x) for x in current_pattern),
+        "total_matches": total,
+        "highest_state": highest_state,
+        "highest_prob": highest_prob,
+        "bull_prob": bull_prob,
+        "current_htf1": current_htf1,
+        "current_htf2": current_htf2,
+        "current_dow": current_dow,
+        "current_session": f"{current_sid4 * 4:02d}:00 - {(current_sid4 + 1) * 4:02d}:00",
+        "current_session8": (
+            "00:00 - 08:00" if current_sid8 == 0
+            else "08:00 - 16:00" if current_sid8 == 1
+            else "16:00 - 00:00"
+        ),
+    }
+
+
 def scan_one_symbol(
     token: str,
     account_id: str,
@@ -725,16 +910,78 @@ def scan_one_symbol(
     alignment_timezone: str,
     weekly_alignment: str,
 ) -> dict:
-    """Run the v5 Strat Probability Tracker logic for one OANDA FX symbol."""
     symbol = instrument_row["name"]
     pip_location = int(instrument_row.get("pipLocation", -4))
 
     base = fetch_candles(
         token, account_id, environment, symbol, granularity, history_bars,
         daily_alignment, alignment_timezone, weekly_alignment, "M"
-    )
+    ).reset_index(drop=True)
 
-    # Only make extra HTF API calls when those filters are actually enabled.
+    # Fast path: no S/R. This is the common scanner case.
+    if not filter_sr:
+        htf1_states = None
+        htf2_states = None
+
+        if filter_htf:
+            htf1 = fetch_candles(
+                token, account_id, environment, symbol, htf_input,
+                min(history_bars, 5000),
+                daily_alignment, alignment_timezone, weekly_alignment, "M"
+            )
+            htf1_states = _align_state_fast(base["time"], htf1)
+
+        if filter_htf2:
+            htf2 = fetch_candles(
+                token, account_id, environment, symbol, htf_input2,
+                min(history_bars, 5000),
+                daily_alignment, alignment_timezone, weekly_alignment, "M"
+            )
+            htf2_states = _align_state_fast(base["time"], htf2)
+
+        result = _fast_prediction(
+            base,
+            use_offset,
+            int(lookback_n),
+            int(max_history),
+            filter_htf,
+            htf1_states,
+            filter_htf2,
+            htf2_states,
+            filter_dow,
+            int(dow_shift_days),
+            filter_4h,
+            filter_8h,
+        )
+
+        current_idx = result["current_end"]
+        current_row = base.loc[current_idx]
+
+        row = {
+            "Symbol": symbol,
+            "Pattern": result["current_seq"],
+            "Sample Size": result["total_matches"],
+            "Predicted Next Bar": result["highest_state"] if result["total_matches"] else "N/A",
+            "Next-Bar Probability": result["highest_prob"],
+            "Bullish Probability": result["bull_prob"],
+            "Candle Time": current_row["time"],
+        }
+
+        if filter_htf:
+            row[f"HTF 1 ({htf_input})"] = result["current_htf1"]
+        if filter_htf2:
+            row[f"HTF 2 ({htf_input2})"] = result["current_htf2"]
+        if filter_dow:
+            row["Day of Week"] = result["current_dow"]
+        if filter_4h:
+            row["4H Session"] = result["current_session"]
+        if filter_8h:
+            row["8H Session"] = result["current_session8"]
+
+        return row
+
+    # Exact legacy v5 path when S/R filtering is requested.
+    # S/R construction is inherently more expensive, so we preserve its proven logic.
     htf1 = (
         fetch_candles(
             token, account_id, environment, symbol, htf_input, min(history_bars, 5000),
@@ -742,7 +989,6 @@ def scan_one_symbol(
         )
         if filter_htf else base
     )
-
     htf2 = (
         fetch_candles(
             token, account_id, environment, symbol, htf_input2, min(history_bars, 5000),
@@ -751,16 +997,10 @@ def scan_one_symbol(
         if filter_htf2 else base
     )
 
-    levels = []
-    if filter_sr:
-        levels, _ = build_sr_levels(
-            base,
-            int(min_touches),
-            int(sr_lookback),
-            float(tolerance_mult),
-            float(min_wick_mult),
-            invalidation,
-        )
+    levels, _ = build_sr_levels(
+        base, int(min_touches), int(sr_lookback), float(tolerance_mult),
+        float(min_wick_mult), invalidation
+    )
 
     result = calculate_prediction(
         base=base,
@@ -771,7 +1011,7 @@ def scan_one_symbol(
         max_history=int(max_history),
         filter_htf=filter_htf,
         filter_htf2=filter_htf2,
-        filter_sr=filter_sr,
+        filter_sr=True,
         filter_dow=filter_dow,
         dow_shift_days=int(dow_shift_days),
         filter_4h=filter_4h,
@@ -792,23 +1032,19 @@ def scan_one_symbol(
         "Next-Bar Probability": result["highest_prob"] if result["total_matches"] else None,
         "Bullish Probability": result["bull_prob"] if result["total_matches"] else None,
         "Candle Time": current_row["time"],
+        "S/R Context": result["current_sr"],
     }
-
     if filter_htf:
         row[f"HTF 1 ({htf_input})"] = result["current_htf1"]
     if filter_htf2:
         row[f"HTF 2 ({htf_input2})"] = result["current_htf2"]
-    if filter_sr:
-        row["S/R Context"] = result["current_sr"]
     if filter_dow:
         row["Day of Week"] = result["current_dow"]
     if filter_4h:
         row["4H Session"] = result["current_session"]
     if filter_8h:
         row["8H Session"] = result["current_session8"]
-
     return row
-
 
 def main():
     st.set_page_config(page_title="OANDA Strat Probability Scanner", layout="wide")
@@ -923,7 +1159,7 @@ def main():
         st.divider()
         max_workers = st.slider(
             "Parallel Symbols",
-            1, 50, 5,
+            1, 50, 20,
             help="Lower this if OANDA returns rate-limit/network errors."
         )
 
@@ -972,6 +1208,10 @@ def main():
     ].copy().reset_index(drop=True)
 
     st.write(f"Forex symbols available from this OANDA account: **{len(forex_df)}**")
+    if filter_sr:
+        st.warning("S/R filtering is enabled, so the scanner uses the exact legacy v5 S/R engine. This mode is much slower.")
+    else:
+        st.caption("Fast scanner mode active: vectorized Strat states and NumPy pattern matching; no S/R engine is being built.")
 
     if not scan:
         st.info("Configure the tracker settings, then click **Scan All OANDA Forex Symbols**.")
