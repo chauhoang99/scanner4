@@ -725,17 +725,26 @@ def _fast_strat_states(df: pd.DataFrame) -> np.ndarray:
     color = np.where(green, "G", "R")
 
     body = np.abs(cc - co)
+    # Match the original v5 strat_state() exactly: doji bodies use mintick.
+    # pipLocation is not available inside this helper, so use the smallest
+    # positive price increment observed as a safe effective-body floor.
+    diffs = np.abs(np.diff(np.unique(np.concatenate([o, h, l, c]))))
+    positive_diffs = diffs[diffs > 0]
+    mintick_fast = float(positive_diffs.min()) if positive_diffs.size else 1e-10
+    eff_body = np.maximum(body, mintick_fast)
+
     upper = ch - np.maximum(co, cc)
     lower = np.minimum(co, cc) - cl
 
-    # Same hammer/shooter intent used by the original tracker.
-    hammer = (lower > body * 2.0) & (upper <= body)
-    shooter = (upper > body * 2.0) & (lower <= body)
+    # Exact v5 hammer / shooter rules.
+    hammer = (lower >= 2.0 * eff_body) & (lower > upper)
+    shooter = (upper >= 2.0 * eff_body) & (upper > lower)
 
     state = np.empty(n - 1, dtype=object)
     state[:] = "N/A"
 
-    state[inside] = np.char.add(np.full(inside.sum(), "1", dtype=str), color[inside])
+    # Original v5 inside bar is simply "1" (no G/R suffix).
+    state[inside] = "1"
 
     mask3 = outside
     normal3 = mask3 & ~hammer & ~shooter
@@ -743,13 +752,14 @@ def _fast_strat_states(df: pd.DataFrame) -> np.ndarray:
     state[mask3 & hammer] = "3-H"
     state[mask3 & shooter] = "3-SS"
 
-    mask2u = two_up & ~inside
+    # Preserve 2U / 2D for ordinary Type-2 candles.
+    mask2u = two_up
     normal2u = mask2u & ~hammer & ~shooter
     state[normal2u] = np.char.add(np.full(normal2u.sum(), "2U", dtype=str), color[normal2u])
     state[mask2u & hammer] = "2-H"
     state[mask2u & shooter] = "2-SS"
 
-    mask2d = two_down & ~inside
+    mask2d = two_down
     normal2d = mask2d & ~hammer & ~shooter
     state[normal2d] = np.char.add(np.full(normal2d.sum(), "2D", dtype=str), color[normal2d])
     state[mask2d & hammer] = "2-H"
@@ -760,7 +770,8 @@ def _fast_strat_states(df: pd.DataFrame) -> np.ndarray:
 
 
 def _bullish_state_fast(state: str) -> bool:
-    return state in ("2-H", "3-H") or str(state).endswith("G")
+    s = str(state)
+    return s in ("2-H", "3-H") or s.endswith("G")
 
 
 def _align_state_fast(base_times: pd.Series, htf: pd.DataFrame) -> np.ndarray:
