@@ -712,7 +712,7 @@ def main():
         weekly_alignment = st.selectbox("Weekly alignment", ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"], index=4)
 
         st.divider()
-        chart_bars = st.slider("Chart candles", 50, 500, 250, step=25)
+        chart_bars = st.slider("Chart candles", 50, 500, 50, step=25)
         refresh = st.button("Refresh OANDA data", type="primary", use_container_width=True)
 
     if not token:
