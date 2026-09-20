@@ -1,5 +1,5 @@
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 import requests
@@ -90,14 +90,20 @@ htf_options_map = {
 htf_timeframe = st.sidebar.selectbox("Higher Timeframe (Context)", htf_options_map[timeframe], index=0)
 
 if data_source == "OANDA API":
-    sample_count = st.sidebar.slider("Historical Candle Count", 100, 4000, 1000, step=100)
-    history_period = "2y"
+    current_yr = datetime.now().year
+    start_year = st.sidebar.selectbox(
+        "Historical Start Year",
+        options=list(range(2005, current_yr + 1)),
+        index=15, # Defaults to around 2020
+        help="Paginated API requests will fetch data from Jan 1 of this year up to present."
+    )
+    history_period = None
 else:
+    start_year = 2005
     if timeframe == "15m":
         history_period = st.sidebar.selectbox("History Range", ["5d", "1mo", "60d"], index=2)
     else:
         history_period = st.sidebar.selectbox("History Range", ["1y", "2y", "5y", "10y", "max"], index=1)
-    sample_count = 1000
 
 lookback_n = st.sidebar.slider("Pattern Lookback Window (Candles)", min_value=1, max_value=5, value=3, help="Number of past consecutive candle structures to match historically.")
 include_live_bar = st.sidebar.checkbox("Include Live (Unclosed) Candle", value=False, help="When unchecked, current forming bar is excluded.")
@@ -109,35 +115,72 @@ if st.sidebar.button("🔄 Run Analysis"):
     st.rerun()
 
 # ---------------------------------------------------------
-# DATA FETCHING
+# PAGINATED OANDA DATA FETCHING ENGINE
 # ---------------------------------------------------------
-@st.cache_data(ttl=300)
-def fetch_oanda_data(symbol_name, gran, count, token, env):
+@st.cache_data(ttl=3600)
+def fetch_oanda_data_paginated(symbol_name, gran, start_yr, token, env):
+    """
+    Loops backward through OANDA's 5,000 candle per-request limit to 
+    build full historical datasets back to start_yr (e.g. 2005).
+    """
     inst = ticker_mapping.get(symbol_name, symbol_name.replace("=X", "").replace("=", "_"))
     domain = "api-fxtrade.oanda.com" if env == "Live" else "api-fxpractice.oanda.com"
     url = f"https://{domain}/v3/instruments/{inst}/candles"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    params = {"price": "M", "granularity": gran, "count": min(count, 5000)}
 
-    try:
-        res = requests.get(url, headers=headers, params=params, timeout=15)
-        if res.status_code == 200:
+    start_date_iso = f"{start_yr}-01-01T00:00:00Z"
+    all_candles = []
+    to_time = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    # Safety guard: Limit max iterations to prevent infinite API polling loops
+    max_requests = 60 
+    req_count = 0
+
+    while req_count < max_requests:
+        params = {
+            "price": "M",
+            "granularity": gran,
+            "count": 5000,
+            "to": to_time
+        }
+        try:
+            res = requests.get(url, headers=headers, params=params, timeout=15)
+            if res.status_code != 200:
+                break
+
             candles = res.json().get("candles", [])
-            rows = [{
-                "Date": pd.to_datetime(c["time"]),
-                "Open": float(c["mid"]["o"]),
-                "High": float(c["mid"]["h"]),
-                "Low": float(c["mid"]["l"]),
-                "Close": float(c["mid"]["c"]),
-                "Complete": c.get("complete", True)
-            } for c in candles]
-            df = pd.DataFrame(rows)
-            if not df.empty:
-                df.set_index("Date", inplace=True)
-            return df
-    except Exception:
+            if not candles:
+                break
+
+            all_candles = candles + all_candles  # Prepend older batch
+            oldest_time = candles[0]["time"]
+
+            if oldest_time <= start_date_iso or len(candles) < 5000:
+                break
+
+            to_time = oldest_time
+            req_count += 1
+        except Exception:
+            break
+
+    if not all_candles:
         return None
-    return None
+
+    rows = [{
+        "Date": pd.to_datetime(c["time"]),
+        "Open": float(c["mid"]["o"]),
+        "High": float(c["mid"]["h"]),
+        "Low": float(c["mid"]["l"]),
+        "Close": float(c["mid"]["c"]),
+        "Complete": c.get("complete", True)
+    } for c in all_candles]
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df.drop_duplicates(subset=["Date"], inplace=True)
+        df.sort_values("Date", inplace=True)
+        df.set_index("Date", inplace=True)
+    return df
 
 @st.cache_data(ttl=300)
 def fetch_yf_data(ticker, period, interval):
@@ -154,7 +197,7 @@ def fetch_yf_data(ticker, period, interval):
 # ---------------------------------------------------------
 def get_candle_structure_series(df):
     """
-    Classifies candles using strict Pine Script Strat logic:
+    Classifies candles strictly using Pine Script Strat rules:
     - Type 1  (Inside Bar):  High <= Prev High and Low >= Prev Low
     - Type 2U (Up):          High >  Prev High and Low >= Prev Low
     - Type 2D (Down):        High <= Prev High and Low <  Prev Low
@@ -163,8 +206,6 @@ def get_candle_structure_series(df):
     Direction:
     - ↑: Bullish / Green (Close >= Open)
     - ↓: Bearish / Red   (Close < Open)
-
-    Formatted Output Example: "2U ↑", "1 ↓", "3 ↑", "2D ↓"
     """
     if df is None or len(df) < 2:
         return pd.DataFrame()
@@ -184,7 +225,6 @@ def get_candle_structure_series(df):
         higher_high = h_curr > h_prev
         lower_low = l_curr < l_prev
 
-        # 1. Structure Type Classification
         if higher_high and lower_low:
             num = "3"
         elif higher_high and not lower_low:
@@ -194,10 +234,7 @@ def get_candle_structure_series(df):
         else:
             num = "1"
 
-        # 2. Candle Direction (Green vs Red)
         arrow = "↑" if c_curr >= o_curr else "↓"
-
-        # State string matching Pine Script output: e.g., "2U ↑"
         state = f"{num} {arrow}"
 
         states.append(state)
@@ -353,8 +390,9 @@ if data_source == "OANDA API":
     if not api_token:
         st.warning("⚠️ OANDA API token missing. Please enter it in the sidebar or switch data source to Yahoo Finance.")
         st.stop()
-    raw_df = fetch_oanda_data(symbol, granularity_map.get(timeframe, "D"), sample_count, api_token, oanda_env)
-    raw_htf_df = fetch_oanda_data(symbol, granularity_map.get(htf_timeframe, "W"), max(100, int(sample_count / 5)), api_token, oanda_env)
+    with st.spinner(f"Fetching paginated historical OANDA candles back to {start_year}..."):
+        raw_df = fetch_oanda_data_paginated(symbol, granularity_map.get(timeframe, "D"), start_year, api_token, oanda_env)
+        raw_htf_df = fetch_oanda_data_paginated(symbol, granularity_map.get(htf_timeframe, "W"), start_year, api_token, oanda_env)
 else:
     raw_df = fetch_yf_data(symbol, history_period, timeframe)
     raw_htf_df = fetch_yf_data(symbol, history_period, htf_timeframe)
@@ -391,17 +429,20 @@ else:
         )
 
         status_label = "Live Candle Included" if include_live_bar else "Closed Candles Only"
-        st.markdown(f"Tracking Strat candle structure transitions for **{symbol}** on timeframe **{timeframe}** (`{status_label}`).")
+        min_date_str = df.index[0].strftime("%Y-%m-%d")
+        max_date_str = df.index[-1].strftime("%Y-%m-%d")
+
+        st.markdown(f"Tracking Strat candle structure transitions for **{symbol}** ({timeframe}) from **{min_date_str}** to **{max_date_str}** (`{status_label}`).")
 
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("Total Dataset Candles", len(state_history))
+            st.metric("Total Sample Size (Candles)", f"{len(state_history):,}")
         with col2:
             st.metric("Current Pattern Sequence", " ➔ ".join(current_pattern))
         with col3:
             st.metric(f"Active HTF ({htf_timeframe}) Context", htf_context)
         with col4:
-            st.metric("Sample Size (Matching Occurrences)", total_matches)
+            st.metric("Matching Historical Occurrences", total_matches)
 
         st.markdown("---")
         
