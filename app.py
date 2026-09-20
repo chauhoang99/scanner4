@@ -505,27 +505,40 @@ def calculate_prediction(
     }
 
 
-def calculate_all_pattern_stats(result: Dict, lookback_n: int, max_history: int, filter_htf: bool, filter_htf2: bool, filter_sr: bool, filter_dow: bool, dow_shift_days: int, filter_4h: bool, filter_8h: bool, sr_levels: List[Level]) -> pd.DataFrame:
-    """Aggregate every found LTF pattern using the same next-bar/bullish logic as the Pine tracker.
+def calculate_all_pattern_stats(
+    result: Dict,
+    lookback_n: int,
+    max_history: int,
+    filter_htf: bool,
+    filter_htf2: bool,
+    filter_sr: bool,
+    filter_dow: bool,
+    dow_shift_days: int,
+    filter_4h: bool,
+    filter_8h: bool,
+    sr_levels: List[Level],
+) -> pd.DataFrame:
+    """Aggregate every found LTF pattern and its following-bar statistics.
 
-    Enabled context filters are held to the currently selected context, exactly like the
-    main prediction. Only the LTF pattern sequence varies across the historical scan.
+    Important: when DOW / 4H / 8H are enabled, those time components are part
+    of the pattern identity. Therefore the same candle-state sequence occurring
+    in different enabled time buckets is grouped as a different pattern.
+
+    HTF and S/R filters retain the Pine/current-context behavior.
     """
     df = result["df"]
     n = len(df)
-    current_end = result["current_end"]
+
     current_htf1 = result["current_htf1"]
     current_htf2 = result["current_htf2"]
     current_sr = result["current_sr"]
-    current_dow = result["current_dow"]
-    current_sid, _ = four_hour_session(df.loc[current_end, "time"])
-    current_sid8, _ = eight_hour_session(df.loc[current_end, "time"])
 
+    # Key:
+    # (day-or-None, 4h-session-or-None, 8h-session-or-None, pattern-string)
     grouped = {}
-    # Scan chronological pattern endpoints. A pattern must have one following bar.
+
     first_end = lookback_n - 1
-    last_end = n - 2
-    # Match Pine's historical lookback cap by limiting distance from the latest bar.
+    last_end = n - 2  # need a following candle
     first_allowed = max(first_end, n - 1 - max_history - lookback_n)
 
     for hist_end in range(first_allowed, last_end + 1):
@@ -534,6 +547,7 @@ def calculate_all_pattern_stats(result: Dict, lookback_n: int, max_history: int,
         if hist_start < 0:
             continue
 
+        # HTF / S/R remain filters against the current selected context.
         is_match = True
         if filter_htf and fmt_state(df.loc[hist_end, "htf1_state"]) != current_htf1:
             is_match = False
@@ -541,46 +555,89 @@ def calculate_all_pattern_stats(result: Dict, lookback_n: int, max_history: int,
             is_match = False
         if is_match and filter_sr and sr_context_from_levels(df.loc[hist_end], sr_levels) != current_sr:
             is_match = False
-        if is_match and filter_dow:
-            hist_ts = df.loc[hist_end, "time"] + pd.Timedelta(days=dow_shift_days)
-            if dow_name(hist_ts) != current_dow:
-                is_match = False
-        if is_match and filter_4h:
-            sid, _ = four_hour_session(df.loc[hist_end, "time"])
-            if sid != current_sid:
-                is_match = False
-        if is_match and filter_8h:
-            sid8, _ = eight_hour_session(df.loc[hist_end, "time"])
-            if sid8 != current_sid8:
-                is_match = False
         if not is_match:
             continue
 
-        states = [fmt_state(x) for x in df.loc[hist_start:hist_end, "ltf_state"].tolist()]
+        # Time context belongs to the pattern key when enabled.
+        hist_time = df.loc[hist_end, "time"]
+
+        day_value = None
+        if filter_dow:
+            shifted = hist_time + pd.Timedelta(days=dow_shift_days)
+            day_value = dow_name(shifted)
+
+        session4_value = None
+        if filter_4h:
+            _, session4_value = four_hour_session(hist_time)
+
+        session8_value = None
+        if filter_8h:
+            _, session8_value = eight_hour_session(hist_time)
+
+        states = [
+            fmt_state(x)
+            for x in df.loc[hist_start:hist_end, "ltf_state"].tolist()
+        ]
         pattern = " ➔ ".join(states)
         next_state = fmt_state(df.loc[next_idx, "ltf_state"])
-        grouped.setdefault(pattern, []).append(next_state)
+
+        key = (day_value, session4_value, session8_value, pattern)
+        grouped.setdefault(key, []).append(next_state)
 
     rows = []
-    for pattern, next_states in grouped.items():
+    for (day_value, session4_value, session8_value, pattern), next_states in grouped.items():
         total = len(next_states)
         counts = pd.Series(next_states, dtype="object").value_counts()
+
         highest_state = str(counts.index[0])
         highest_count = int(counts.iloc[0])
         highest_prob = highest_count / total * 100.0
+
+        # Same bullish logic as the Pine script:
+        # states ending in G, plus 2-H and 3-H.
         bull_count = sum(state_is_bullish(x) for x in next_states)
         bull_prob = bull_count / total * 100.0
-        rows.append({
+
+        row = {}
+        if filter_dow:
+            row["Day of Week"] = day_value
+        if filter_4h:
+            row["4H Session"] = session4_value
+        if filter_8h:
+            row["8H Session"] = session8_value
+
+        row.update({
             "Pattern": pattern,
             "Sample Size": total,
             "Most Probable Next Bar": highest_state,
             "Next-Bar Probability %": highest_prob,
             "Bullish Probability %": bull_prob,
         })
+        rows.append(row)
+
+    columns = []
+    if filter_dow:
+        columns.append("Day of Week")
+    if filter_4h:
+        columns.append("4H Session")
+    if filter_8h:
+        columns.append("8H Session")
+    columns += [
+        "Pattern",
+        "Sample Size",
+        "Most Probable Next Bar",
+        "Next-Bar Probability %",
+        "Bullish Probability %",
+    ]
 
     if not rows:
-        return pd.DataFrame(columns=["Pattern", "Sample Size", "Most Probable Next Bar", "Next-Bar Probability %", "Bullish Probability %"])
-    return pd.DataFrame(rows).sort_values(["Sample Size", "Next-Bar Probability %"], ascending=[False, False]).reset_index(drop=True)
+        return pd.DataFrame(columns=columns)
+
+    out = pd.DataFrame(rows)
+    return out.sort_values(
+        ["Sample Size", "Next-Bar Probability %"],
+        ascending=[False, False],
+    ).reset_index(drop=True)[columns]
 
 
 def touch_width(touches: int) -> int:
@@ -712,7 +769,7 @@ def main():
         weekly_alignment = st.selectbox("Weekly alignment", ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"], index=4)
 
         st.divider()
-        chart_bars = st.slider("Chart candles", 50, 500, 50, step=25)
+        chart_bars = st.slider("Chart candles", 50, 500, 250, step=25)
         refresh = st.button("Refresh OANDA data", type="primary", use_container_width=True)
 
     if not token:
@@ -843,7 +900,7 @@ def main():
             display_stats["Next-Bar Probability"] = display_stats.pop("Next-Bar Probability %").map(lambda x: f"{x:.2f}%")
             display_stats["Bullish Probability"] = display_stats.pop("Bullish Probability %").map(lambda x: f"{x:.2f}%")
             st.dataframe(display_stats, hide_index=True, use_container_width=True)
-            st.caption("Each row is a complete pattern sequence of the selected lookback length. Sample Size is the number of historical occurrences. Most Probable Next Bar and its probability are calculated from the bars immediately following those occurrences. Bullish Probability uses the Pine rule: states ending in G plus 2-H and 3-H are bullish.")
+            st.caption("Each row is a distinct historical pattern. When Day of Week, 4H Session, or 8H Session is enabled, that time component becomes part of the pattern identity and is shown in its own column. Sample Size and next-bar probabilities are therefore calculated separately for each time-context + candle-pattern combination. Bullish Probability uses the Pine rule: states ending in G plus 2-H and 3-H are bullish.")
         else:
             st.write("No historical patterns found for the selected filters.")
 
