@@ -923,7 +923,7 @@ def main():
         st.divider()
         max_workers = st.slider(
             "Parallel Symbols",
-            1, 10, 5,
+            1, 50, 50,
             help="Lower this if OANDA returns rate-limit/network errors."
         )
 
