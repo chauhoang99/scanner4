@@ -401,6 +401,7 @@ def calculate_prediction(
     filter_8h: bool,
     sr_levels: List[Level],
     mintick: float,
+    playback_end: Optional[int] = None,
 ) -> Dict:
     df = base.copy().reset_index(drop=True)
     df["ltf_state"] = compute_strat_states(df, mintick)
@@ -413,7 +414,11 @@ def calculate_prediction(
 
     n = len(df)
     off = 1 if use_offset else 0
-    current_end = n - 1 - off
+
+    # Normal mode evaluates the latest bar according to use_offset.
+    # Playback mode evaluates the exact historical bar selected by the user.
+    current_end = (n - 1 - off) if playback_end is None else int(playback_end)
+    current_end = max(0, min(current_end, n - 1))
     current_start = current_end - lookback_n + 1
 
     if current_start < 0:
@@ -433,17 +438,17 @@ def calculate_prediction(
     current_sr = sr_context_from_levels(df.loc[current_end], sr_levels)
 
     matches = []
-    earliest_endpoint = lookback_n + off  # corresponds to Pine i = 1 + off
-    latest_i = min(n - 1 - lookback_n - off, max_history)
 
-    if latest_i >= 1 + off:
-        for i in range(1 + off, latest_i + 1):
-            # Pine pattern: ltf_state[i+k] for k=0..lookback-1.
-            # In chronological dataframe this endpoint is n-1-(i+lookback-1).
-            hist_end = n - 1 - (i + lookback_n - 1)
+    # Only use information that would have existed at the selected bar.
+    # This prevents playback from looking into candles after the playback point.
+    latest_hist_end = current_end - 1
+    earliest_hist_end = max(lookback_n - 1, latest_hist_end - max_history + 1)
+
+    if latest_hist_end >= earliest_hist_end:
+        for hist_end in range(latest_hist_end, earliest_hist_end - 1, -1):
             hist_start = hist_end - lookback_n + 1
             next_idx = hist_end + 1
-            if hist_start < 0 or next_idx >= n:
+            if hist_start < 0 or next_idx > current_end:
                 continue
 
             hist_states = df.loc[hist_start:hist_end, "ltf_state"].tolist()
@@ -769,6 +774,32 @@ def main():
         weekly_alignment = st.selectbox("Weekly alignment", ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"], index=4)
 
         st.divider()
+        st.header("Historical Playback")
+        playback_enabled = st.checkbox(
+            "Enable historical playback",
+            False,
+            help="Go back to a historical candle and step forward one candle at a time. Calculations only use data available up to the selected playback candle.",
+        )
+        playback_bars_back = st.number_input(
+            "Start bars back",
+            min_value=1,
+            max_value=max(1, int(history_bars) - int(lookback_n) - 1),
+            value=min(100, max(1, int(history_bars) - int(lookback_n) - 1)),
+            step=1,
+            disabled=not playback_enabled,
+            help="Example: 100 starts playback 100 chart candles before the latest available candle.",
+        )
+
+        if "playback_key" not in st.session_state:
+            st.session_state.playback_key = None
+        if "playback_index" not in st.session_state:
+            st.session_state.playback_index = None
+
+        pb1, pb2 = st.columns(2)
+        playback_reset = pb1.button("⏮ Go to bar", use_container_width=True, disabled=not playback_enabled)
+        playback_next = pb2.button("▶ Next bar", use_container_width=True, disabled=not playback_enabled)
+
+        st.divider()
         chart_bars = st.slider("Chart candles", 50, 500, 250, step=25)
         refresh = st.button("Refresh OANDA data", type="primary", use_container_width=True)
 
@@ -793,6 +824,37 @@ def main():
             htf2 = fetch_candles(token, account_id, environment, instrument, htf_input2, min(history_bars, 5000),
                                  daily_alignment, alignment_timezone, weekly_alignment, price_component)
 
+        # Resolve the playback cursor against the freshly fetched base dataframe.
+        playback_end = None
+        full_base = base.copy().reset_index(drop=True)
+        playback_key = (environment, account_id, instrument, granularity, int(history_bars))
+
+        if playback_enabled:
+            latest_allowed = len(full_base) - 1
+            requested_start = max(int(lookback_n), latest_allowed - int(playback_bars_back))
+
+            if playback_reset or st.session_state.playback_key != playback_key or st.session_state.playback_index is None:
+                st.session_state.playback_key = playback_key
+                st.session_state.playback_index = requested_start
+
+            if playback_next:
+                st.session_state.playback_index = min(
+                    latest_allowed,
+                    int(st.session_state.playback_index) + 1,
+                )
+
+            playback_end = max(
+                int(lookback_n),
+                min(int(st.session_state.playback_index), latest_allowed),
+            )
+
+            # Hide future candles completely, like a replay cursor.
+            base = full_base.iloc[: playback_end + 1].copy().reset_index(drop=True)
+        else:
+            st.session_state.playback_key = None
+            st.session_state.playback_index = None
+            base = full_base
+
         levels, _ = build_sr_levels(base, int(min_touches), int(lookback), float(tolerance_mult),
                                     float(min_wick_mult), invalidation)
 
@@ -812,6 +874,7 @@ def main():
             filter_8h=filter_8h,
             sr_levels=levels,
             mintick=10 ** pip_location,
+            playback_end=(len(base) - 1) if playback_enabled else None,
         )
 
     except Exception as e:
@@ -826,11 +889,18 @@ def main():
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Instrument", instrument)
     c2.metric("LTF", granularity)
-    c3.metric("Latest OANDA candle", current_row["time"].strftime("%Y-%m-%d %H:%M UTC"))
+    c3.metric("Playback candle" if playback_enabled else "Latest OANDA candle", current_row["time"].strftime("%Y-%m-%d %H:%M UTC"))
     c4.metric("Latest close", f"{current_row['close']:.{display_precision}f}")
     c5.metric("Active S/R levels", str(len(levels)))
 
-    if not bool(base.iloc[-1]["complete"]):
+    if playback_enabled:
+        remaining = len(full_base) - 1 - int(playback_end)
+        st.warning(
+            f"▶ PLAYBACK MODE — cursor: {current_row['time'].strftime('%Y-%m-%d %H:%M UTC')} "
+            f"({remaining} candle{'s' if remaining != 1 else ''} remaining to latest data). "
+            "Future candles are hidden and probability calculations use only data available up to this cursor."
+        )
+    elif not bool(base.iloc[-1]["complete"]):
         st.success("OANDA returned an active/incomplete LTF candle — live mode can therefore use the current candle without waiting for the bar to close.")
     else:
         st.info("The latest OANDA LTF candle is currently marked complete.")
