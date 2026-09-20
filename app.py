@@ -1,4 +1,4 @@
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 import pandas as pd
 import requests
@@ -8,11 +8,11 @@ import streamlit as st
 # STREAMLIT PAGE CONFIGURATION
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Strat Candle Probability Tracker", layout="wide"
+    page_title="Pine Script Strat Probability Tracker", layout="wide"
 )
 
 # ---------------------------------------------------------
-# OANDA TICKER & TIME FRAME MAPPING
+# OANDA TICKER & TIMEFRAME MAPPING
 # ---------------------------------------------------------
 TICKER_MAPPING = {
     "EUR/USD": "EUR_USD",
@@ -42,20 +42,13 @@ GRANULARITY_MAP = {
     "1 Month": "M",
 }
 
-HTF_OPTIONS_MAP = {
-    "15 Minutes": ["1 Hour", "4 Hours", "1 Day", "1 Week"],
-    "1 Hour": ["4 Hours", "1 Day", "1 Week", "1 Month"],
-    "4 Hours": ["1 Day", "1 Week", "1 Month"],
-    "1 Day": ["1 Week", "1 Month"],
-    "1 Week": ["1 Month"],
-}
+HTF_OPTIONS = ["None", "1 Hour", "4 Hours", "1 Day", "1 Week", "1 Month"]
 
 # ---------------------------------------------------------
-# SIDEBAR CONTROLS
+# SIDEBAR CONTROLS & PINE SCRIPT FILTERS
 # ---------------------------------------------------------
 st.sidebar.header("OANDA API Credentials")
 
-# Attempt secret retrieval if available
 secret_token = st.secrets.get("oanda_api_token", "")
 secret_env = st.secrets.get("oanda_env", "Practice")
 
@@ -78,53 +71,59 @@ selected_symbol = st.sidebar.selectbox(
     "Symbol", options=list(TICKER_MAPPING.keys()), index=0
 )
 execution_tf = st.sidebar.selectbox(
-    "Selected Execution Timeframe",
-    options=list(GRANULARITY_MAP.keys()),
-    index=3,
-)
-
-available_htfs = HTF_OPTIONS_MAP.get(execution_tf, ["1 Month"])
-htf_context_tf = st.sidebar.selectbox(
-    "Higher Timeframe Context (HTF)", options=available_htfs, index=0
+    "Execution Timeframe", options=list(GRANULARITY_MAP.keys()), index=3
 )
 
 current_year = datetime.now().year
 start_year = st.sidebar.selectbox(
     "Historical Start Year",
     options=list(range(2005, current_year + 1)),
-    index=15,  # Defaults to 2020
-    help="Fetches data from Jan 1 of this year through current date.",
+    index=15,  # Defaults to ~2020
+    help="Fetches OANDA data from present day backward until Jan 1 of this year.",
 )
 
 st.sidebar.markdown("---")
-st.sidebar.header("Pattern Analysis Parameters")
+st.sidebar.header("🌲 Pine Script Strat Filters")
+
+match_mode = st.sidebar.radio(
+    "Pattern Match Mode",
+    ["Exact (Number + Arrow Direction)", "Structure Only (Numbers Only)"],
+    index=0,
+    help="Exact matches '2U ↑', whereas Structure Only matches '2U' regardless of candle color.",
+)
+
+setup_filter = st.sidebar.selectbox(
+    "Strat Setup Filter",
+    ["All Patterns", "Reversals Only (e.g. 2-2 / 1-2 / 3-2)", "Continuations Only (e.g. 2U-2U / 2D-2D)"],
+    index=0,
+)
+
+st.sidebar.subheader("Full Timeframe Continuity (FTFC)")
+htf_1 = st.sidebar.selectbox("Primary HTF Context", HTF_OPTIONS, index=4)  # 1 Week
+htf_2 = st.sidebar.selectbox("Secondary HTF Context", HTF_OPTIONS, index=5)  # 1 Month
 
 lookback_n = st.sidebar.slider(
-    "Pattern Window (N Candles)",
-    min_value=1,
-    max_value=5,
-    value=3,
-    help="Number of consecutive prior candles matched in historical sequence.",
+    "Pattern Window (N Candles)", min_value=1, max_value=5, value=3
+)
+min_sample_cutoff = st.sidebar.slider(
+    "Min Historical Occurrences Cutoff", min_value=1, max_value=20, value=1
 )
 include_live_bar = st.sidebar.checkbox(
     "Include Unclosed (Live) Candle", value=False
 )
-filter_by_htf = st.sidebar.checkbox(
-    f"Filter by HTF Context ({htf_context_tf})", value=True
-)
 
 
 # ---------------------------------------------------------
-# THREAD-SAFE PAGINATED OANDA FETCHER
+# BACKWARD PAGINATED OANDA DATA ENGINE
 # ---------------------------------------------------------
 @st.cache_data(ttl=3600)
 def fetch_oanda_data_paginated(symbol_key, timeframe_key, start_yr, token, env):
-    """Fetches candles directly for the user-selected timeframe from OANDA
+    """Fetches complete data from present day back to start_yr by looping backwards
 
-    using forward-chunked pagination (up to 5,000 candles per batch).
+    using clean RFC3339 timestamps.
     """
-    if not token:
-        return None, "OANDA API Token is missing."
+    if not token or timeframe_key == "None":
+        return None, None
 
     inst = TICKER_MAPPING.get(symbol_key, "EUR_USD")
     gran = GRANULARITY_MAP.get(timeframe_key, "D")
@@ -137,11 +136,11 @@ def fetch_oanda_data_paginated(symbol_key, timeframe_key, start_yr, token, env):
         "Content-Type": "application/json",
     }
 
-    from_time = f"{start_yr}-01-01T00:00:00Z"
-    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    target_start_iso = f"{start_yr}-01-01T00:00:00Z"
+    to_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     all_candles = []
-    max_batches = 30  # Safety cap (up to 150,000 candles per timeframe)
+    max_batches = 60
     batch_count = 0
 
     while batch_count < max_batches:
@@ -149,7 +148,7 @@ def fetch_oanda_data_paginated(symbol_key, timeframe_key, start_yr, token, env):
             "price": "M",
             "granularity": gran,
             "count": 5000,
-            "from": from_time,
+            "to": to_time,
         }
         try:
             res = requests.get(
@@ -166,23 +165,19 @@ def fetch_oanda_data_paginated(symbol_key, timeframe_key, start_yr, token, env):
             if not candles:
                 break
 
-            all_candles.extend(candles)
+            # Prepend chronologically
+            all_candles = candles + all_candles
 
-            # Advance timestamp by 1 second to prevent fetching duplicate boundary bar
-            last_time_str = candles[-1]["time"]
-            last_dt = pd.to_datetime(last_time_str)
-            next_from_time = (last_dt + pd.Timedelta(seconds=1)).strftime(
-                "%Y-%m-%dT%H:%M:%SZ"
-            )
+            oldest_time_str = candles[0]["time"]
+            oldest_dt = pd.to_datetime(oldest_time_str)
+            oldest_iso = oldest_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-            if (
-                len(candles) < 5000
-                or next_from_time >= now_iso
-                or next_from_time <= from_time
-            ):
+            if oldest_iso <= target_start_iso or len(candles) < 5000:
                 break
 
-            from_time = next_from_time
+            to_time = (oldest_dt - pd.Timedelta(seconds=1)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
             batch_count += 1
         except Exception as e:
             return None, f"Connection error: {str(e)}"
@@ -214,19 +209,11 @@ def fetch_oanda_data_paginated(symbol_key, timeframe_key, start_yr, token, env):
 # PINE SCRIPT STRAT ENGINE
 # ---------------------------------------------------------
 def classify_strat_candles(df):
-    """Classifies OHLC candles into pure Pine Script Strat types:
-
-    Type 1  (Inside):  High <= Prev High and Low >= Prev Low
-    Type 2U (Up):      High >  Prev High and Low >= Prev Low
-    Type 2D (Down):    High <= Prev High and Low <  Prev Low
-    Type 3  (Outside): High >  Prev High and Low <  Prev Low
-    Arrows: Close >= Open -> ↑, Close < Open -> ↓
-    """
+    """Classifies OHLC candles into pure Pine Script Strat types."""
     if df is None or len(df) < 2:
         return pd.DataFrame()
 
-    states = []
-    dates = []
+    states, struct_nums, dates = [], [], []
 
     for i in range(1, len(df)):
         h_prev, l_prev = df["High"].iloc[i - 1], df["Low"].iloc[i - 1]
@@ -247,53 +234,114 @@ def classify_strat_candles(df):
 
         arrow = "↑" if c_curr >= o_curr else "↓"
         states.append(f"{num} {arrow}")
+        struct_nums.append(num)
         dates.append(df.index[i])
 
-    return pd.DataFrame({"Date": pd.to_datetime(dates), "State": states})
-
-
-def calculate_probabilities(
-    exec_states, htf_states, n_back, filter_htf_enabled
-):
-    if exec_states.empty or len(exec_states) <= n_back:
-        return [], {}, 0, "N/A"
-
-    merged = exec_states.sort_values("Date").copy()
-    current_htf_state = "N/A"
-
-    if filter_htf_enabled and not htf_states.empty:
-        merged = pd.merge_asof(
-            merged,
-            htf_states.sort_values("Date"),
-            on="Date",
-            direction="backward",
-            suffixes=("", "_HTF"),
-        )
-        if "State_HTF" in merged.columns:
-            current_htf_state = merged["State_HTF"].iloc[-1]
-
-    states = merged["State"].tolist()
-    htf_list = (
-        merged["State_HTF"].tolist() if "State_HTF" in merged.columns else []
+    return pd.DataFrame(
+        {
+            "Date": pd.to_datetime(dates),
+            "State": states,
+            "StructNum": struct_nums,
+        }
     )
 
-    current_pattern = states[-n_back:]
+
+def is_reversal(state1, state2):
+    s1 = state1.split()[0]
+    s2 = state2.split()[0]
+    if s1 in ["2D", "1", "3"] and s2 == "2U":
+        return True
+    if s1 in ["2U", "1", "3"] and s2 == "2D":
+        return True
+    return False
+
+
+def is_continuation(state1, state2):
+    s1 = state1.split()[0]
+    s2 = state2.split()[0]
+    return (s1 == "2U" and s2 == "2U") or (s1 == "2D" and s2 == "2D")
+
+
+def calculate_strat_probabilities(
+    exec_df,
+    htf1_df,
+    htf2_df,
+    n_back,
+    match_mode_str,
+    setup_type_str,
+    min_cutoff,
+):
+    if exec_df.empty or len(exec_df) <= n_back:
+        return [], {}, 0, "N/A", "N/A"
+
+    merged = exec_df.sort_values("Date").copy()
+
+    # Merge Primary HTF Context
+    curr_htf1 = "N/A"
+    if htf1_df is not None and not htf1_df.empty:
+        merged = pd.merge_asof(
+            merged,
+            htf1_df.sort_values("Date"),
+            on="Date",
+            direction="backward",
+            suffixes=("", "_HTF1"),
+        )
+        if "State_HTF1" in merged.columns:
+            curr_htf1 = merged["State_HTF1"].iloc[-1]
+
+    # Merge Secondary HTF Context
+    curr_htf2 = "N/A"
+    if htf2_df is not None and not htf2_df.empty:
+        merged = pd.merge_asof(
+            merged,
+            htf2_df.sort_values("Date"),
+            on="Date",
+            direction="backward",
+            suffixes=("", "_HTF2"),
+        )
+        if "State_HTF2" in merged.columns:
+            curr_htf2 = merged["State_HTF2"].iloc[-1]
+
+    use_exact = "Exact" in match_mode_str
+    target_series = merged["State"] if use_exact else merged["StructNum"]
+    states_list = target_series.tolist()
+
+    current_pattern = states_list[-n_back:]
     next_states = []
 
-    for i in range(len(states) - n_back):
-        window = states[i : i + n_back]
-        pattern_match = window == current_pattern
+    htf1_list = (
+        merged["State_HTF1"].tolist() if "State_HTF1" in merged.columns else []
+    )
+    htf2_list = (
+        merged["State_HTF2"].tolist() if "State_HTF2" in merged.columns else []
+    )
 
-        context_match = True
-        if filter_htf_enabled and current_htf_state != "N/A" and htf_list:
-            context_match = htf_list[i + n_back - 1] == current_htf_state
+    for i in range(len(states_list) - n_back):
+        window = states_list[i : i + n_back]
+        if window != current_pattern:
+            continue
 
-        if pattern_match and context_match:
-            if i + n_back < len(states):
-                next_states.append(states[i + n_back])
+        # Check Setup Filter (Reversal vs Continuation)
+        if setup_type_str.startswith("Reversals"):
+            if not is_reversal(merged["State"].iloc[i + n_back - 2], merged["State"].iloc[i + n_back - 1]):
+                continue
+        elif setup_type_str.startswith("Continuations"):
+            if not is_continuation(merged["State"].iloc[i + n_back - 2], merged["State"].iloc[i + n_back - 1]):
+                continue
 
-    if not next_states:
-        return current_pattern, {}, 0, current_htf_state
+        # Check FTFC Constraints
+        if curr_htf1 != "N/A" and htf1_list:
+            if htf1_list[i + n_back - 1] != curr_htf1:
+                continue
+        if curr_htf2 != "N/A" and htf2_list:
+            if htf2_list[i + n_back - 1] != curr_htf2:
+                continue
+
+        if i + n_back < len(states_list):
+            next_states.append(merged["State"].iloc[i + n_back])
+
+    if not next_states or len(next_states) < min_cutoff:
+        return current_pattern, {}, len(next_states), curr_htf1, curr_htf2
 
     total = len(next_states)
     counts = Counter(next_states)
@@ -302,95 +350,97 @@ def calculate_probabilities(
         for k, v in sorted(counts.items(), key=lambda x: x[1], reverse=True)
     }
 
-    return current_pattern, probs, total, current_htf_state
+    return current_pattern, probs, total, curr_htf1, curr_htf2
 
 
 # ---------------------------------------------------------
-# MAIN APPLICATION INTERFACE
+# MAIN DASHBOARD UI
 # ---------------------------------------------------------
-st.title("📈 Strat Candle Probability Tracker")
+st.title("🌲 Pine Script Strat Probability Tracker")
 
 if not api_token:
-    st.info(
-        "👋 Please enter your **OANDA API Token** in the sidebar to load market data."
-    )
+    st.info("👋 Enter your **OANDA API Token** in the sidebar to start.")
     st.stop()
 
-# Fetch selected timeframe and HTF context
 with st.spinner(
-    f"Fetching historical OANDA data for {selected_symbol} ({execution_tf}) since {start_year}..."
+    f"Loading OANDA data for {selected_symbol} ({execution_tf}) back to {start_year}..."
 ):
     df_exec, err_exec = fetch_oanda_data_paginated(
         selected_symbol, execution_tf, start_year, api_token, oanda_env
     )
-    df_htf, err_htf = fetch_oanda_data_paginated(
-        selected_symbol, htf_context_tf, start_year, api_token, oanda_env
+    df_htf1, _ = fetch_oanda_data_paginated(
+        selected_symbol, htf_1, start_year, api_token, oanda_env
+    )
+    df_htf2, _ = fetch_oanda_data_paginated(
+        selected_symbol, htf_2, start_year, api_token, oanda_env
     )
 
-if err_exec:
-    st.error(f"Error fetching execution timeframe data: {err_exec}")
+if err_exec or df_exec is None:
+    st.error(f"Error loading execution data: {err_exec}")
     st.stop()
 
-if err_htf:
-    st.warning(
-        f"Warning regarding HTF context data: {err_htf}. Proceeding with execution TF only."
-    )
-
-# Filter out live/incomplete bars if unselected
 if not include_live_bar:
-    if df_exec is not None and "Complete" in df_exec.columns:
+    if "Complete" in df_exec.columns:
         df_exec = df_exec[df_exec["Complete"] == True]
-    if df_htf is not None and "Complete" in df_htf.columns:
-        df_htf = df_htf[df_htf["Complete"] == True]
+    if df_htf1 is not None and "Complete" in df_htf1.columns:
+        df_htf1 = df_htf1[df_htf1["Complete"] == True]
+    if df_htf2 is not None and "Complete" in df_htf2.columns:
+        df_htf2 = df_htf2[df_htf2["Complete"] == True]
 
-# Classify structures
 exec_classified = classify_strat_candles(df_exec)
-htf_classified = (
-    classify_strat_candles(df_htf) if df_htf is not None else pd.DataFrame()
+htf1_classified = (
+    classify_strat_candles(df_htf1) if df_htf1 is not None else pd.DataFrame()
+)
+htf2_classified = (
+    classify_strat_candles(df_htf2) if df_htf2 is not None else pd.DataFrame()
 )
 
-if exec_classified.empty:
-    st.error("Insufficient candles to evaluate Strat structures.")
-    st.stop()
-
-# Calculate probabilities
-current_pattern, probabilities, total_matches, active_htf = (
-    calculate_probabilities(
-        exec_classified, htf_classified, lookback_n, filter_by_htf
+current_pattern, probabilities, total_matches, active_htf1, active_htf2 = (
+    calculate_strat_probabilities(
+        exec_classified,
+        htf1_classified,
+        htf2_classified,
+        lookback_n,
+        match_mode,
+        setup_filter,
+        min_sample_cutoff,
     )
 )
 
-# Display Summary Metrics
+# Date Verification Banner
+earliest_loaded = df_exec.index[0].strftime("%Y-%m-%d")
+latest_loaded = df_exec.index[-1].strftime("%Y-%m-%d")
+st.success(
+    f"Loaded **{len(df_exec):,} candles** spanning from **{earliest_loaded}** to **{latest_loaded}**."
+)
+
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Loaded Candles", f"{len(exec_classified):,}")
-m2.metric("Current Pattern Sequence", " ➔ ".join(current_pattern))
-m3.metric(f"Active HTF ({htf_context_tf})", active_htf)
-m4.metric("Matching Sequence Occurrences", total_matches)
+m1.metric("Current Pattern Sequence", " ➔ ".join(current_pattern))
+m2.metric(f"HTF 1 ({htf_1}) Context", active_htf1)
+m3.metric(f"HTF 2 ({htf_2}) Context", active_htf2)
+m4.metric("Matching Sequence Samples", total_matches)
 
 st.markdown("---")
 
-# Display Probabilities
-if total_matches > 0:
-    st.subheader("📊 Probabilities for Next Candle")
+if total_matches >= min_sample_cutoff and probabilities:
+    st.subheader("📊 Probabilities for Next Strat Candle")
 
     prob_df = pd.DataFrame(
         list(probabilities.items()),
         columns=["Next Candle Structure", "Probability (%)"],
     )
 
-    col_tbl, col_cht = st.columns([1, 1])
-
-    with col_tbl:
+    c_tbl, c_cht = st.columns([1, 1])
+    with c_tbl:
         st.markdown("##### Detailed Breakdown")
         st.dataframe(prob_df, use_container_width=True, hide_index=True)
-
-    with col_cht:
+    with c_cht:
         st.markdown("##### Structure Distribution")
         st.bar_chart(
             prob_df.set_index("Next Candle Structure")["Probability (%)"]
         )
 
-    # Aggregates (Up vs Down, Structure Breakdown)
+    # Aggregates
     up_prob = sum(
         v
         for k, v in probabilities.items()
@@ -428,19 +478,19 @@ if total_matches > 0:
     )
 
     st.markdown("---")
-    c1, c2 = st.columns(2)
-    with c1:
+    col1, col2 = st.columns(2)
+    with col1:
         st.markdown("##### Directional Probability (Up vs Down)")
         st.dataframe(dir_df, use_container_width=True, hide_index=True)
         st.bar_chart(dir_df.set_index("Direction")["Probability (%)"])
-
-    with c2:
-        st.markdown("##### Strat Structure Type Probability")
+    with col2:
+        st.markdown("##### Strat Structure Breakdown")
         st.dataframe(struct_df, use_container_width=True, hide_index=True)
         st.bar_chart(struct_df.set_index("Structure")["Probability (%)"])
+
 else:
     st.warning(
-        f"No historical matches found for the sequence {' ➔ '.join(current_pattern)} under active HTF context '{active_htf}'."
+        f"No historical matches found meeting all active Pine Script filters (Sample cutoff: {min_sample_cutoff}). Try broadening your filters."
     )
 
 with st.expander("🔍 View Recent Classified Candle History"):
