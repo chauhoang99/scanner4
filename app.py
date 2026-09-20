@@ -36,23 +36,24 @@ class Level:
     touches: int
 
 
-def get_credentials() -> Tuple[str, str, str]:
-    """Read credentials from Streamlit secrets first, then environment variables."""
+def get_credentials() -> Tuple[str, str]:
+    """Read API token/environment. Account ID is discovered from OANDA."""
     token = ""
-    account_id = ""
     env = "Practice"
-
     try:
         token = st.secrets.get("OANDA_TOKEN", "")
-        account_id = st.secrets.get("OANDA_ACCOUNT_ID", "")
         env = st.secrets.get("OANDA_ENVIRONMENT", "Practice")
     except Exception:
         pass
-
     token = token or os.getenv("OANDA_TOKEN", "")
-    account_id = account_id or os.getenv("OANDA_ACCOUNT_ID", "")
     env = env or os.getenv("OANDA_ENVIRONMENT", "Practice")
-    return token, account_id, env
+    return token, env
+
+
+def discover_accounts(token: str, env: str) -> list:
+    """Return accounts authorized by the supplied OANDA token."""
+    data = oanda_get("/v3/accounts", token, env)
+    return data.get("accounts", [])
 
 
 def api_base(env: str) -> str:
@@ -70,6 +71,15 @@ def oanda_get(path: str, token: str, env: str, params: Optional[dict] = None) ->
             detail = response.text
         raise RuntimeError(f"OANDA API {response.status_code}: {detail}")
     return response.json()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def discover_account_ids(token: str, env: str) -> tuple:
+    accounts = discover_accounts(token, env)
+    ids = tuple(a.get("id") for a in accounts if a.get("id"))
+    if not ids:
+        raise RuntimeError("No OANDA accounts are authorized for this API token.")
+    return ids
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -535,15 +545,27 @@ def main():
     st.title("Key Body Level Rejection Finder & Strat Tracker — OANDA")
     st.caption("Python/Streamlit conversion of the supplied Pine Script. Market data is pulled directly from OANDA v20 REST API.")
 
-    token0, account0, env0 = get_credentials()
+    token0, env0 = get_credentials()
 
     with st.sidebar:
         st.header("OANDA Connection")
         environment = st.selectbox("Environment", ["Practice", "Live"], index=0 if env0.lower().startswith("prac") else 1)
         token = st.text_input("OANDA API token", value=token0, type="password", help="Prefer storing this in Streamlit secrets rather than hard-coding it.")
-        account_id = st.text_input("OANDA Account ID", value=account0)
 
         st.divider()
+        st.header("Account")
+        account_id = None
+        if token:
+            try:
+                account_ids = discover_account_ids(token, environment)
+                if len(account_ids) == 1:
+                    account_id = account_ids[0]
+                    st.caption(f"Account: {account_id}")
+                else:
+                    account_id = st.selectbox("OANDA account", list(account_ids))
+            except Exception as e:
+                st.error(f"Unable to discover OANDA account: {e}")
+
         st.header("Market")
         if token and account_id:
             try:
@@ -598,8 +620,12 @@ def main():
         chart_bars = st.slider("Chart candles", 50, 500, 250, step=25)
         refresh = st.button("Refresh OANDA data", type="primary", use_container_width=True)
 
-    if not token or not account_id:
-        st.info("Enter your OANDA API token and account ID in the sidebar, or configure OANDA_TOKEN and OANDA_ACCOUNT_ID in Streamlit secrets.")
+    if not token:
+        st.info("Enter your OANDA API token in the sidebar, or configure OANDA_TOKEN in Streamlit secrets. The account ID is discovered automatically from the token.")
+        st.stop()
+
+    if not account_id:
+        st.info("No OANDA account could be discovered from this API token.")
         st.stop()
 
     if refresh:
