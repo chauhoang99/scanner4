@@ -79,10 +79,8 @@ granularity_map = {
     "15m": "M15", "60m": "H1", "1d": "D", "1wk": "W", "1mo": "M"
 }
 
-# Configurable Execution Timeframe (Includes 15m)
 timeframe = st.sidebar.selectbox("Execution Timeframe", ["15m", "60m", "1d", "1wk"], index=2)
 
-# Dynamically map valid Higher Timeframes based on selected Execution Timeframe
 htf_options_map = {
     "15m": ["60m", "1d", "1wk", "1mo"],
     "60m": ["1d", "1wk", "1mo"],
@@ -95,7 +93,6 @@ if data_source == "OANDA API":
     sample_count = st.sidebar.slider("Historical Candle Count", 100, 4000, 1000, step=100)
     history_period = "2y"
 else:
-    # Yahoo Finance limits intraday intervals (15m) to a maximum of 60 days
     if timeframe == "15m":
         history_period = st.sidebar.selectbox("History Range", ["5d", "1mo", "60d"], index=2)
     else:
@@ -153,9 +150,18 @@ def fetch_yf_data(ticker, period, interval):
         return None
 
 # ---------------------------------------------------------
-# UNIFIED STRAT CANDLE CLASSIFICATION ENGINE
+# PINE SCRIPT MATCHED STRAT CANDLE CLASSIFICATION ENGINE
 # ---------------------------------------------------------
 def get_candle_structure_series(df):
+    """
+    Classifies candles strictly using Pine Script Strat rules:
+    - 1: Inside Bar (High <= Prev High and Low >= Prev Low)
+    - 2U: Directional Up (High > Prev High and Low >= Prev Low)
+    - 2D: Directional Down (High <= Prev High and Low < Prev Low)
+    - 3: Outside Bar (High > Prev High and Low < Prev Low)
+    
+    Includes directional arrow (↑/↓) and Pine Script in-force breakout status (▲/▼).
+    """
     if df is None or len(df) < 2:
         return pd.DataFrame()
 
@@ -165,6 +171,7 @@ def get_candle_structure_series(df):
     for i in range(1, len(df)):
         h_prev = df["High"].iloc[i-1]
         l_prev = df["Low"].iloc[i-1]
+        
         h_curr = df["High"].iloc[i]
         l_curr = df["Low"].iloc[i]
         c_curr = df["Close"].iloc[i]
@@ -173,7 +180,7 @@ def get_candle_structure_series(df):
         higher_high = h_curr > h_prev
         lower_low = l_curr < l_prev
 
-        # 1. Strat Candle Structure Type
+        # 1. Strat Candle Structure Type (Pine Script Standard)
         if higher_high and lower_low:
             num = "3"
         elif higher_high and not lower_low:
@@ -186,15 +193,15 @@ def get_candle_structure_series(df):
         # 2. Candle Color Direction (Close vs Open)
         arrow = "↑" if c_curr >= o_curr else "↓"
 
-        # 3. Solid Triangle (In-Force Holding Condition)
+        # 3. Pine Script In-Force Trigger Status
         if c_curr > h_prev:
-            triangle = "▲"
+            triangle = "▲"  # Bullish In-Force (Closed above prior high)
         elif c_curr < l_prev:
-            triangle = "▼"
+            triangle = "▼"  # Bearish In-Force (Closed below prior low)
         else:
             triangle = ""
 
-        # Universal Output Formatting: [Type] [Arrow] [Triangle]
+        # Composite State Format: [Type] [Arrow] [Triangle]
         state = f"{num} {arrow} {triangle}".strip()
 
         states.append(state)
@@ -229,7 +236,6 @@ def calculate_next_state_probabilities(state_df, htf_df=None, n_back=3, use_htf_
     for i in range(len(states) - n_back):
         window = states[i:i+n_back]
         
-        # Condition check: Match LTF pattern AND matching HTF Context (if enabled)
         pattern_match = (window == current_pattern)
         context_match = True
         
