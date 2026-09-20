@@ -376,6 +376,15 @@ def fmt_state(state) -> str:
     return "N/A" if state is None or pd.isna(state) else str(state)
 
 
+def eight_hour_session(ts: pd.Timestamp) -> Tuple[int, str]:
+    h = ts.hour
+    sid = h // 8
+    labels = [
+        "00:00 - 08:00", "08:00 - 16:00", "16:00 - 00:00"
+    ]
+    return sid, labels[sid]
+
+
 def calculate_prediction(
     base: pd.DataFrame,
     htf1: pd.DataFrame,
@@ -389,6 +398,7 @@ def calculate_prediction(
     filter_dow: bool,
     dow_shift_days: int,
     filter_4h: bool,
+    filter_8h: bool,
     sr_levels: List[Level],
     mintick: float,
 ) -> Dict:
@@ -419,6 +429,7 @@ def calculate_prediction(
     current_ts_shifted = current_ts + pd.Timedelta(days=dow_shift_days)
     current_dow = dow_name(current_ts_shifted)
     current_sid, current_session = four_hour_session(current_ts)
+    current_sid8, current_session8 = eight_hour_session(current_ts)
     current_sr = sr_context_from_levels(df.loc[current_end], sr_levels)
 
     matches = []
@@ -456,6 +467,10 @@ def calculate_prediction(
                 hist_sid, _ = four_hour_session(df.loc[hist_end, "time"])
                 if hist_sid != current_sid:
                     is_match = False
+            if is_match and filter_8h:
+                hist_sid8, _ = eight_hour_session(df.loc[hist_end, "time"])
+                if hist_sid8 != current_sid8:
+                    is_match = False
 
             if is_match:
                 matches.append(fmt_state(df.loc[next_idx, "ltf_state"]))
@@ -480,6 +495,7 @@ def calculate_prediction(
         "current_sr": current_sr,
         "current_dow": current_dow,
         "current_session": current_session,
+        "current_session8": current_session8,
         "matches": matches,
         "total_matches": total,
         "highest_state": highest_state,
@@ -487,6 +503,84 @@ def calculate_prediction(
         "bull_prob": bull_prob,
         "state_counts": counts,
     }
+
+
+def calculate_all_pattern_stats(result: Dict, lookback_n: int, max_history: int, filter_htf: bool, filter_htf2: bool, filter_sr: bool, filter_dow: bool, dow_shift_days: int, filter_4h: bool, filter_8h: bool, sr_levels: List[Level]) -> pd.DataFrame:
+    """Aggregate every found LTF pattern using the same next-bar/bullish logic as the Pine tracker.
+
+    Enabled context filters are held to the currently selected context, exactly like the
+    main prediction. Only the LTF pattern sequence varies across the historical scan.
+    """
+    df = result["df"]
+    n = len(df)
+    current_end = result["current_end"]
+    current_htf1 = result["current_htf1"]
+    current_htf2 = result["current_htf2"]
+    current_sr = result["current_sr"]
+    current_dow = result["current_dow"]
+    current_sid, _ = four_hour_session(df.loc[current_end, "time"])
+    current_sid8, _ = eight_hour_session(df.loc[current_end, "time"])
+
+    grouped = {}
+    # Scan chronological pattern endpoints. A pattern must have one following bar.
+    first_end = lookback_n - 1
+    last_end = n - 2
+    # Match Pine's historical lookback cap by limiting distance from the latest bar.
+    first_allowed = max(first_end, n - 1 - max_history - lookback_n)
+
+    for hist_end in range(first_allowed, last_end + 1):
+        hist_start = hist_end - lookback_n + 1
+        next_idx = hist_end + 1
+        if hist_start < 0:
+            continue
+
+        is_match = True
+        if filter_htf and fmt_state(df.loc[hist_end, "htf1_state"]) != current_htf1:
+            is_match = False
+        if is_match and filter_htf2 and fmt_state(df.loc[hist_end, "htf2_state"]) != current_htf2:
+            is_match = False
+        if is_match and filter_sr and sr_context_from_levels(df.loc[hist_end], sr_levels) != current_sr:
+            is_match = False
+        if is_match and filter_dow:
+            hist_ts = df.loc[hist_end, "time"] + pd.Timedelta(days=dow_shift_days)
+            if dow_name(hist_ts) != current_dow:
+                is_match = False
+        if is_match and filter_4h:
+            sid, _ = four_hour_session(df.loc[hist_end, "time"])
+            if sid != current_sid:
+                is_match = False
+        if is_match and filter_8h:
+            sid8, _ = eight_hour_session(df.loc[hist_end, "time"])
+            if sid8 != current_sid8:
+                is_match = False
+        if not is_match:
+            continue
+
+        states = [fmt_state(x) for x in df.loc[hist_start:hist_end, "ltf_state"].tolist()]
+        pattern = " ➔ ".join(states)
+        next_state = fmt_state(df.loc[next_idx, "ltf_state"])
+        grouped.setdefault(pattern, []).append(next_state)
+
+    rows = []
+    for pattern, next_states in grouped.items():
+        total = len(next_states)
+        counts = pd.Series(next_states, dtype="object").value_counts()
+        highest_state = str(counts.index[0])
+        highest_count = int(counts.iloc[0])
+        highest_prob = highest_count / total * 100.0
+        bull_count = sum(state_is_bullish(x) for x in next_states)
+        bull_prob = bull_count / total * 100.0
+        rows.append({
+            "Pattern": pattern,
+            "Sample Size": total,
+            "Most Probable Next Bar": highest_state,
+            "Next-Bar Probability %": highest_prob,
+            "Bullish Probability %": bull_prob,
+        })
+
+    if not rows:
+        return pd.DataFrame(columns=["Pattern", "Sample Size", "Most Probable Next Bar", "Next-Bar Probability %", "Bullish Probability %"])
+    return pd.DataFrame(rows).sort_values(["Sample Size", "Next-Bar Probability %"], ascending=[False, False]).reset_index(drop=True)
 
 
 def touch_width(touches: int) -> int:
@@ -606,6 +700,8 @@ def main():
         filter_dow = st.checkbox("Filter by Day of Week", False)
         dow_shift_days = st.slider("Day of Week Shift (Days)", -2, 2, 0)
         filter_4h = st.checkbox("Filter by 4-Hour Session", False)
+        filter_8h = st.checkbox("Filter by 8-Hour Session", False)
+        show_all_patterns = st.checkbox("Display All Found Patterns", False, help="Show every historical pattern sequence, its sample size, most probable next-bar state, next-bar probability, and bullish probability using the Pine tracker logic.")
         lookback_n = st.slider("Pattern Lookback Window (Candles)", 1, 5, 3)
         max_history = st.slider("Historical Lookback Bars", 100, 5000, 4600, step=100)
 
@@ -656,6 +752,7 @@ def main():
             filter_dow=filter_dow,
             dow_shift_days=int(dow_shift_days),
             filter_4h=filter_4h,
+            filter_8h=filter_8h,
             sr_levels=levels,
             mintick=10 ** pip_location,
         )
@@ -697,6 +794,8 @@ def main():
         rows.append(("Day of Week Context", result["current_dow"]))
     if filter_4h:
         rows.append(("4-Hour Session Context", result["current_session"]))
+    if filter_8h:
+        rows.append(("8-Hour Session Context", result["current_session8"]))
 
     rows.extend([
         ("Closed Pattern Sequence" if use_offset else "Pattern Sequence (Inc. Live)", result["current_seq"]),
@@ -723,15 +822,39 @@ def main():
         else:
             st.write("No active S/R clusters found with the current settings.")
 
-    # -------------------- distribution --------------------
-    with st.expander("Historical next-state distribution"):
+    # -------------------- all found pattern statistics --------------------
+    if show_all_patterns:
+        st.subheader("All Found Pattern Statistics")
+        all_stats = calculate_all_pattern_stats(
+            result=result,
+            lookback_n=int(lookback_n),
+            max_history=int(max_history),
+            filter_htf=filter_htf,
+            filter_htf2=filter_htf2,
+            filter_sr=filter_sr,
+            filter_dow=filter_dow,
+            dow_shift_days=int(dow_shift_days),
+            filter_4h=filter_4h,
+            filter_8h=filter_8h,
+            sr_levels=levels,
+        )
+        if len(all_stats):
+            display_stats = all_stats.copy()
+            display_stats["Next-Bar Probability"] = display_stats.pop("Next-Bar Probability %").map(lambda x: f"{x:.2f}%")
+            display_stats["Bullish Probability"] = display_stats.pop("Bullish Probability %").map(lambda x: f"{x:.2f}%")
+            st.dataframe(display_stats, hide_index=True, use_container_width=True)
+            st.caption("Each row is a complete pattern sequence of the selected lookback length. Sample Size is the number of historical occurrences. Most Probable Next Bar and its probability are calculated from the bars immediately following those occurrences. Bullish Probability uses the Pine rule: states ending in G plus 2-H and 3-H are bullish.")
+        else:
+            st.write("No historical patterns found for the selected filters.")
+
+    with st.expander("Current pattern next-state distribution"):
         counts = result["state_counts"]
         if len(counts):
             dist = counts.rename("Occurrences").to_frame()
             dist["Probability %"] = dist["Occurrences"] / result["total_matches"] * 100
             st.dataframe(dist, use_container_width=True)
         else:
-            st.write("No historical matches for the selected pattern and filters.")
+            st.write("No historical matches for the selected current pattern and filters.")
 
     # -------------------- raw data --------------------
     with st.expander("Latest OANDA candles"):
@@ -739,7 +862,7 @@ def main():
         show["time"] = show["time"].dt.strftime("%Y-%m-%d %H:%M:%S UTC")
         st.dataframe(show.iloc[::-1], hide_index=True, use_container_width=True)
 
-    st.caption("OANDA candle timestamps are UTC. OANDA's candle endpoint supports up to 5,000 candles per request; this app requests at most that amount. The original Pine logic was preserved where practical, while chart rendering is implemented with Plotly.")
+    st.caption("OANDA candle timestamps are UTC. Sessions are calculated from the OANDA candle timestamp: 4-hour blocks and 8-hour blocks start at 00:00 UTC. OANDA's candle endpoint supports up to 5,000 candles per request; this app requests at most that amount. The original Pine logic was preserved where practical, while chart rendering is implemented with Plotly.")
 
 
 if __name__ == "__main__":
