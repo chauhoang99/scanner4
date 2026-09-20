@@ -116,7 +116,6 @@ def fetch_candles(
         "granularity": granularity,
         "count": min(int(count), 5000),
         "smooth": "false",
-        "includeFirst": "true",
         "dailyAlignment": int(daily_alignment),
         "alignmentTimezone": alignment_timezone,
         "weeklyAlignment": weekly_alignment,
