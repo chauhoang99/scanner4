@@ -863,7 +863,7 @@ def main():
         )
 
         lookback_n = st.slider("Pattern Lookback Window (Candles)", 1, 5, 3)
-        max_history = st.slider("Historical Lookback Bars", 100, 5000, 4600, step=100)
+        max_history = st.slider("Historical Lookback Bars", 100, 5000, 5000, step=100)
 
         st.divider()
         st.header("Context Filters")
