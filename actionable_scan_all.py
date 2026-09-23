@@ -411,37 +411,6 @@ def main():
             "OANDA Candles to Load", 200, 5000, 5000, step=100,
             help="Maximum historical bars used for setup discovery and v7-style outcome statistics."
         )
-        use_offset = st.checkbox(
-            "Use Closed Bars Only", True, disabled=True,
-            help="This scanner is intentionally fixed to the last two CLOSED candles."
-        )
-        lookback_n = st.slider(
-            "Pattern Lookback Window (Candles)", 1, 5, 2, disabled=True,
-            help="Fixed to the latest A/B pair. One-candle watch items inspect B only."
-        )
-
-        st.divider()
-        st.header("Context Filters")
-        # Kept for configuration compatibility with the supplied scanner. The new v7
-        # actionable engine does not apply these legacy next-bar filters.
-        filter_htf = st.checkbox("Filter by HTF 1", False, disabled=True)
-        htf_input = st.selectbox("HTF 1", GRANULARITIES, index=GRANULARITIES.index("D"), disabled=True)
-        filter_htf2 = st.checkbox("Filter by HTF 2", False, disabled=True)
-        htf_input2 = st.selectbox("HTF 2", GRANULARITIES, index=GRANULARITIES.index("W"), disabled=True)
-        filter_sr = st.checkbox("Filter by Active S/R Context", False, disabled=True)
-        filter_dow = st.checkbox("Filter by Day of Week", False, disabled=True)
-        dow_shift_days = st.slider("Day of Week Shift (Days)", -2, 2, 0, disabled=True)
-        filter_4h = st.checkbox("Filter by 4-Hour Session", False, disabled=True)
-        filter_8h = st.checkbox("Filter by 8-Hour Session", False, disabled=True)
-
-        st.divider()
-        st.header("S/R Settings")
-        min_touches = st.slider("Minimum Touches", 2, 5, 2, disabled=True)
-        sr_lookback = st.slider("S/R Lookback", 50, 500, 200, step=10, disabled=True)
-        tolerance_mult = st.number_input("ATR Tolerance Multiplier", 0.01, 2.0, 0.20, step=0.01, disabled=True)
-        min_wick_mult = st.number_input("Minimum Wick ATR Multiplier", 0.0, 5.0, 0.0, step=0.05, disabled=True)
-        invalidation = st.selectbox("S/R Invalidation", ["Close", "Wick"], disabled=True)
-
         st.divider()
         st.header("OANDA Candle Alignment")
         daily_alignment = st.number_input("Daily alignment hour", 0, 23, 17)
