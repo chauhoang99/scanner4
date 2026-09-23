@@ -18,28 +18,43 @@ GRANULARITIES = [
 # -----------------------------------------------------------------------------
 # EASY-TO-EDIT WATCHLIST
 # -----------------------------------------------------------------------------
-# A one-candle entry checks only B (the latest closed candle).
-# A two-candle entry checks A -> B (the two latest closed candles).
+# Pattern registry. Each entry explicitly defines A and B.
+# None means "any state". A trailing * means a state family wildcard.
+# Examples:
+#   {"a": None, "b": "1"}   -> B only: B must be Type 1
+#   {"a": "3*", "b": None} -> A only: any Type-3 state (3G/3R/3-H/3-SS)
+#   {"a": "2UG", "b": "2UR"} -> exact A -> B setup
 #
 # Exact v7 states:
 # 1, 2UG, 2UR, 2DG, 2DR, 2-H, 2-SS, 3G, 3R, 3-H, 3-SS
-#
-# The requested Type-2 pairs are included below. Add/remove tuples here only.
 SCAN_PATTERNS = [
-    ("1",),
-    ("2-SS",),
-    ("2-H",),
-    ("3-SS",),
-    ("3-H",),
-    ("2UG", "2UR"),
-    ("2UG", "2DR"),
-    ("2UG", "2UG"),
-    ("2DG", "2UR"),
-    ("2DG", "2DR"),
-    ("2DR", "2UG"),
-    ("2DR", "2DR"),
-    (None, "3G",),
-    (None, "3R",),
+    {"a": None, "b": "1"},
+    {"a": None, "b": "2-SS"},
+    {"a": None, "b": "2-H"},
+    {"a": "3*", "b": None},
+    # 2 Up → 2 Up
+    {"a": "2UG", "b": "2UG"},
+    {"a": "2UG", "b": "2UR"},
+    {"a": "2UR", "b": "2UG"},
+    {"a": "2UR", "b": "2UR"},
+
+    # 2 Up → 2 Down
+    {"a": "2UG", "b": "2DG"},
+    {"a": "2UG", "b": "2DR"},
+    {"a": "2UR", "b": "2DG"},
+    {"a": "2UR", "b": "2DR"},
+
+    # 2 Down → 2 Up
+    {"a": "2DG", "b": "2UG"},
+    {"a": "2DG", "b": "2UR"},
+    {"a": "2DR", "b": "2UG"},
+    {"a": "2DR", "b": "2UR"},
+
+    # 2 Down → 2 Down
+    {"a": "2DG", "b": "2DG"},
+    {"a": "2DG", "b": "2DR"},
+    {"a": "2DR", "b": "2DG"},
+    {"a": "2DR", "b": "2DR"},
 ]
 
 
@@ -201,17 +216,40 @@ def compute_states(df: pd.DataFrame, mintick: float, include_color: bool = True)
     return out
 
 
+def state_matches(actual: str, wanted: Optional[str]) -> bool:
+    """Match an exact v7 state, any state (None), or a family wildcard such as 3*."""
+    if wanted is None:
+        return True
+    wanted = str(wanted)
+    actual = str(actual)
+    if wanted.endswith("*"):
+        return actual.startswith(wanted[:-1])
+    return actual == wanted
+
+
+def pattern_matches(a_state: str, b_state: str, pattern: Dict) -> bool:
+    return state_matches(a_state, pattern.get("a")) and state_matches(b_state, pattern.get("b"))
+
+
+def pattern_label(pattern: Dict) -> str:
+    a = pattern.get("a")
+    b = pattern.get("b")
+    if a is None:
+        return f"B={b}"
+    if b is None:
+        return f"A={a}"
+    return f"{a} ➔ {b}"
+
+
 def find_latest_watch_setup(states: np.ndarray, last_closed: int) -> Optional[Dict]:
-    """Check only the latest closed B and, for 2-candle patterns, A/B."""
+    """Check only A (second-last closed) and B (latest closed) against the registry."""
     if last_closed < 1:
         return None
     b = str(states[last_closed])
     a = str(states[last_closed - 1])
     for pattern in SCAN_PATTERNS:
-        if len(pattern) == 1 and b == pattern[0]:
-            return {"pattern": pattern, "label": pattern[0], "a_state": a, "b_state": b}
-        if len(pattern) == 2 and (a, b) == tuple(pattern):
-            return {"pattern": pattern, "label": f"{a} ➔ {b}", "a_state": a, "b_state": b}
+        if pattern_matches(a, b, pattern):
+            return {"pattern": pattern, "label": pattern_label(pattern), "a_state": a, "b_state": b}
     return None
 
 
@@ -252,7 +290,7 @@ def resolve_active_ohlc(direction, sl, tp, h, l):
     return 0
 
 
-def actionable_stats_for_pattern(df: pd.DataFrame, states: np.ndarray, pattern: tuple, history_bars: int) -> List[Dict]:
+def actionable_stats_for_pattern(df: pd.DataFrame, states: np.ndarray, pattern: Dict, history_bars: int) -> List[Dict]:
     """
     Replays historical A->B->C using the v7 trade definitions.
 
@@ -299,7 +337,7 @@ def actionable_stats_for_pattern(df: pd.DataFrame, states: np.ndarray, pattern: 
         if a_idx < 1:
             continue
         a_state, b_state = str(states[a_idx]), str(states[b_idx])
-        matched = b_state == pattern[0] if len(pattern) == 1 else (a_state, b_state) == tuple(pattern)
+        matched = pattern_matches(a_state, b_state, pattern)
         if not matched:
             continue
 
@@ -488,7 +526,7 @@ def main():
     )
     type_counts = scan_df["type"].value_counts().sort_index()
     st.caption("Instrument mix: " + ", ".join(f"{k}: {v}" for k, v in type_counts.items()))
-    st.caption("Watchlist: " + ", ".join(" → ".join(x) for x in SCAN_PATTERNS))
+    st.caption("Watchlist: " + ", ".join(pattern_label(x) for x in SCAN_PATTERNS))
 
     if not scan:
         st.info("Configure the scanner, then click **Scan Selected OANDA Instrument Types**.")
