@@ -257,6 +257,10 @@ def find_latest_watch_setup(states: np.ndarray, last_closed: int) -> Optional[Di
 
 def evaluate_bar_ohlc(b_high, b_low, a_high, a_low, c_high, c_low):
     """Fallback when no lower-TF data is available: v7 semantics, conservative ambiguity."""
+    # Direction is valid only when C breaks one side of B without wicking
+    # through the opposite side.
+    # Long:  C breaks B.high and C.low must stay at/above B.low.
+    # Short: C breaks B.low  and C.high must stay at/below B.high.
     up = c_high > b_high
     dn = c_low < b_low
     if not up and not dn:
