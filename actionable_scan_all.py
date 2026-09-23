@@ -224,24 +224,24 @@ def evaluate_bar_ohlc(b_high, b_low, a_high, a_low, c_high, c_low):
     tp = a_high if direction == 1 else a_low
     hit_tp = c_high >= tp if direction == 1 else c_low <= tp
     hit_sl = c_low <= sl if direction == 1 else c_high >= sl
-    if hit_tp and hit_sl:
-        return direction, 2
+    # Conservative main-TF rule: once direction is known, any bar that
+    # contains the stop is a loss because OHLC cannot prove TP happened first.
+    if hit_sl:
+        return direction, -1
     if hit_tp:
         return direction, 1
-    if hit_sl:
-        return direction, 2  # entry + SL in same main-TF bar: order unknown
     return direction, 3
 
 
 def resolve_active_ohlc(direction, sl, tp, h, l):
     hit_tp = h >= tp if direction == 1 else l <= tp
     hit_sl = l <= sl if direction == 1 else h >= sl
-    if hit_tp and hit_sl:
-        return 2
-    if hit_tp:
-        return 1
+    # Conservative rule for an already-open trade: if TP and SL are both
+    # inside the same main-timeframe candle, count the candle as a loss.
     if hit_sl:
         return -1
+    if hit_tp:
+        return 1
     return 0
 
 
@@ -252,9 +252,10 @@ def actionable_stats_for_pattern(df: pd.DataFrame, states: np.ndarray, pattern: 
     One-candle watch patterns mean "B has this state". A is still the candle before B,
     because v7 requires A's high/low as the target. Two-candle patterns require exact A/B.
 
-    This main-TF implementation is deliberately conservative for bars whose OHLC cannot
-    establish intrabar ordering; those are Ambiguous, just like unresolved same-LTF cases
-    in Pine. The scanner therefore never invents an ordering from OHLC.
+    This main-TF implementation uses a conservative ordering rule when direction is known:
+    if a candle contains the stop level, it is counted as a loss even when the same candle
+    also contains the target. A candle that breaks both B sides before direction can be
+    established remains non-directional and is excluded from Long/Short statistics.
     """
     n = len(df)
     if n < 4:
