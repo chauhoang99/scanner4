@@ -29,9 +29,10 @@ GRANULARITIES = [
 # 1, 2UG, 2UR, 2DG, 2DR, 2-H, 2-SS, 3G, 3R, 3-H, 3-SS
 SCAN_PATTERNS = [
     {"a": None, "b": "1"},
-    {"a": None, "b": "2-SS"},
-    {"a": None, "b": "2-H"},
+    {"a": None, "b": "*-SS"},
+    {"a": None, "b": "*-H"},
     {"a": "3*", "b": None},
+    
     # 2 Up → 2 Up
     {"a": "2UG", "b": "2UG"},
     {"a": "2UG", "b": "2UR"},
