@@ -78,7 +78,7 @@ def strat_states(df,mintick):
 
 def evaluate_from_c(df, i):
     """A=i-2, B=i-1, C=i. First B-side break is entry; opposite B side SL; A same-side extreme TP.
-    Uses selected-TF OHLC. Returns Ambiguous whenever intrabar ordering cannot be known exactly.
+    Uses selected-TF OHLC. Conservative outcome rule: once direction is known, any bar that reaches SL is a Loss, including bars that also reach TP.
     """
     a=df.iloc[i-2]; b=df.iloc[i-1]; c=df.iloc[i]
     long_valid=a.high>b.high
@@ -98,16 +98,14 @@ def evaluate_from_c(df, i):
         hit_tp=c.high>=tp; hit_sl=c.low<=sl
     else:
         hit_tp=c.low<=tp; hit_sl=c.high>=sl
-    if hit_tp and hit_sl:return "Ambiguous outcome",direction,(entry,sl,tp)
-    if hit_tp:return "Win",direction,(entry,sl,tp)
     if hit_sl:return "Loss",direction,(entry,sl,tp)
+    if hit_tp:return "Win",direction,(entry,sl,tp)
     for j in range(i+1,len(df)):
         x=df.iloc[j]
         if direction=="Long": ht=x.high>=tp; hs=x.low<=sl
         else: ht=x.low<=tp; hs=x.high>=sl
-        if ht and hs:return "Ambiguous outcome",direction,(entry,sl,tp)
-        if ht:return "Win",direction,(entry,sl,tp)
         if hs:return "Loss",direction,(entry,sl,tp)
+        if ht:return "Win",direction,(entry,sl,tp)
     return "Open",direction,(entry,sl,tp)
 
 
@@ -124,10 +122,10 @@ def discover_symbol(df,symbol,mintick):
 
 
 def aggregate(raw,min_trades):
-    t=raw[raw.Outcome.isin(["Win","Loss","Ambiguous outcome"])].copy()
+    t=raw[raw.Outcome.isin(["Win","Loss"])].copy()
     if t.empty:return pd.DataFrame()
     g=t.groupby(["Setup","Direction"],dropna=False)
-    out=g.Outcome.agg(Trades="count",Wins=lambda s:(s=="Win").sum(),Losses=lambda s:(s=="Loss").sum(),Ambiguous=lambda s:(s=="Ambiguous outcome").sum()).reset_index()
+    out=g.Outcome.agg(Trades="count",Wins=lambda s:(s=="Win").sum(),Losses=lambda s:(s=="Loss").sum()).reset_index()
     out["Resolved"]=out.Wins+out.Losses
     out["Success Rate %"]=np.where(out.Resolved>0,out.Wins/out.Resolved*100,np.nan)
     out=out[out.Resolved>=min_trades].sort_values(["Success Rate %","Resolved"],ascending=[False,False]).reset_index(drop=True)
@@ -160,7 +158,7 @@ def main():
         alignment_timezone=st.text_input("Alignment timezone","America/New_York")
         weekly_alignment=st.selectbox("Weekly alignment",["Friday","Saturday","Sunday","Monday"],index=0)
         run=st.button("Discover actionable patterns",type="primary",width="stretch")
-    st.info("Intrabar ordering is never guessed. If one selected-timeframe candle contains both possible entry sides, or both TP and SL after entry, that occurrence is marked ambiguous. A lower-timeframe resolver can be added next without changing the setup statistics model.")
+    st.info("Entry direction is not guessed when the actionable candle breaks both sides of B. Once direction is known, the outcome rule is conservative: if any selected-timeframe bar reaches SL, it is counted as a Loss even when that same bar also reaches TP. Lower-timeframe ordering is not used in this version.")
     if not run:return
     if not syms:st.warning("Select at least one symbol.");return
     meta=inst.set_index("name").to_dict("index")
@@ -187,7 +185,7 @@ def main():
     st.subheader("Highest-success actionable A → B patterns")
     if stats.empty: st.warning("No setup meets the minimum resolved-trades filter.")
     else: st.dataframe(stats,width="stretch",hide_index=True,height=min(900,38*(len(stats)+1)))
-    st.caption("Success Rate = Wins / (Wins + Losses). Ambiguous and still-open occurrences are excluded from the denominator. C's final Strat vocabulary is recorded for analysis but is not required to enter the trade.")
+    st.caption("Success Rate = Wins / (Wins + Losses). Once direction is established, a bar touching SL is a Loss even if it also touches TP. Ambiguous-entry and still-open occurrences are excluded from the denominator. C's final Strat vocabulary is recorded for analysis but is not required to enter the trade.")
     with st.expander("Breakdown by symbol"):
         x=raw[raw.Outcome.isin(["Win","Loss"])].groupby(["Symbol","Setup","Direction"]).Outcome.agg(Trades="count",Wins=lambda s:(s=="Win").sum()).reset_index()
         if not x.empty:
