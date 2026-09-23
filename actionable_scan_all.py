@@ -433,7 +433,7 @@ def main():
             "Sort Results By", ["Symbol", "Resolved", "Success %"]
         )
         include_color = st.checkbox("Use G/R in 2 and 3 vocabulary", True)
-        scan = st.button("Scan All OANDA Forex Symbols", type="primary", width="stretch")
+        scan = st.button("Scan Selected OANDA Instrument Types", type="primary", width="stretch")
         refresh = st.button("Clear OANDA Cache", width="stretch")
 
     if refresh:
@@ -455,23 +455,45 @@ def main():
         st.exception(exc)
         st.stop()
 
-    forex_df = instruments_df[
-        instruments_df["type"].astype(str).str.upper().eq("CURRENCY")
+    # Instrument types are configurable. Default to CURRENCY when the account
+    # exposes it, while allowing any combination of types returned by OANDA.
+    instruments_df["type"] = instruments_df["type"].astype(str).str.upper()
+    available_types = sorted(instruments_df["type"].dropna().unique().tolist())
+    default_types = ["CURRENCY"] if "CURRENCY" in available_types else available_types[:1]
+    selected_types = st.sidebar.multiselect(
+        "Instrument Types to Scan",
+        options=available_types,
+        default=default_types,
+        help="Defaults to CURRENCY. Select one or more OANDA instrument types available in this account.",
+    )
+
+    if not selected_types:
+        st.warning("Select at least one instrument type to scan.")
+        st.stop()
+
+    scan_df = instruments_df[
+        instruments_df["type"].isin(selected_types)
     ].copy().reset_index(drop=True)
-    st.write(f"Forex symbols available from this OANDA account: **{len(forex_df)}**")
+
+    st.write(
+        f"Symbols available for selected type(s) **{', '.join(selected_types)}**: "
+        f"**{len(scan_df)}**"
+    )
+    type_counts = scan_df["type"].value_counts().sort_index()
+    st.caption("Instrument mix: " + ", ".join(f"{k}: {v}" for k, v in type_counts.items()))
     st.caption("Watchlist: " + ", ".join(" → ".join(x) for x in SCAN_PATTERNS))
 
     if not scan:
-        st.info("Configure the scanner, then click **Scan All OANDA Forex Symbols**.")
+        st.info("Configure the scanner, then click **Scan Selected OANDA Instrument Types**.")
         st.stop()
 
     rows, errors = [], []
     progress = st.progress(0, text="Starting scan…")
-    total_symbols = len(forex_df)
+    total_symbols = len(scan_df)
 
     with ThreadPoolExecutor(max_workers=int(max_workers)) as executor:
         futures = {}
-        for _, instrument_row in forex_df.iterrows():
+        for _, instrument_row in scan_df.iterrows():
             d = instrument_row.to_dict()
             f = executor.submit(
                 scan_one_symbol,
