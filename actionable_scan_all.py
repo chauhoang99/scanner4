@@ -32,6 +32,7 @@ SCAN_PATTERNS = [
     {"a": None, "b": "*-SS"},
     {"a": None, "b": "*-H"},
     {"a": "3*", "b": None},
+    {"a": "1", "b": None},
     
     # 2 Up → 2 Up
     {"a": "2UG", "b": "2UG"},
