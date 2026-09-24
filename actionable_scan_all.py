@@ -296,7 +296,10 @@ def resolve_active_ohlc(direction, sl, tp, h, l):
     return 0
 
 
-def actionable_stats_for_pattern(df: pd.DataFrame, states: np.ndarray, pattern: Dict, history_bars: int) -> List[Dict]:
+def actionable_stats_for_pattern(
+    df: pd.DataFrame, states: np.ndarray, pattern: Dict, history_bars: int,
+    day_filter: Optional[int] = None, h4_hour_filter: Optional[int] = None,
+) -> List[Dict]:
     """
     Replays historical A->B->C using the v7 trade definitions.
 
@@ -347,6 +350,14 @@ def actionable_stats_for_pattern(df: pd.DataFrame, states: np.ndarray, pattern: 
         if not matched:
             continue
 
+        # Optional historical setup-time filters. The filter is applied to B,
+        # because B is the completed setup candle that the live scanner watches.
+        b_time = pd.Timestamp(df.loc[b_idx, "time"])
+        if day_filter is not None and b_time.dayofweek != int(day_filter):
+            continue
+        if h4_hour_filter is not None and b_time.hour != int(h4_hour_filter):
+            continue
+
         direction, outcome = evaluate_bar_ohlc(
             highs[b_idx], lows[b_idx], highs[a_idx], lows[a_idx], highs[c_idx], lows[c_idx]
         )
@@ -388,6 +399,7 @@ def actionable_stats_for_pattern(df: pd.DataFrame, states: np.ndarray, pattern: 
 def scan_one_symbol(
     token, account_id, environment, instrument_row, granularity, history_bars,
     include_color, daily_alignment, alignment_timezone, weekly_alignment,
+    time_filter_enabled=False,
 ):
     symbol = instrument_row["name"]
     pip_location = int(instrument_row.get("pipLocation", -4))
@@ -411,7 +423,21 @@ def scan_one_symbol(
     if not found:
         return []
 
-    stats_rows = actionable_stats_for_pattern(base, states, found["pattern"], history_bars)
+    # When enabled, compare the current setup only with historical setups that
+    # occurred in the same time bucket as the latest B candle.
+    day_filter = None
+    h4_hour_filter = None
+    if time_filter_enabled:
+        latest_b_time = pd.Timestamp(base.loc[last_closed, "time"])
+        if granularity == "D":
+            day_filter = latest_b_time.dayofweek
+        elif granularity == "H4":
+            h4_hour_filter = latest_b_time.hour
+
+    stats_rows = actionable_stats_for_pattern(
+        base, states, found["pattern"], history_bars,
+        day_filter=day_filter, h4_hour_filter=h4_hour_filter,
+    )
     out = []
     for s in stats_rows:
         out.append({
@@ -421,6 +447,12 @@ def scan_one_symbol(
             "B": found["b_state"],
             **s,
             "B Candle Time": base.loc[last_closed, "time"],
+            "Time Filter": (
+                pd.Timestamp(base.loc[last_closed, "time"]).day_name()
+                if time_filter_enabled and granularity == "D"
+                else (f"{pd.Timestamp(base.loc[last_closed, 'time']).hour:02d}:00"
+                      if time_filter_enabled and granularity == "H4" else "All")
+            ),
         })
     return out
 
@@ -457,6 +489,16 @@ def main():
         st.header("Scanner")
         granularity = st.selectbox(
             "LTF / Scanner Timeframe", GRANULARITIES, index=GRANULARITIES.index("H1")
+        )
+        time_filter_enabled = st.checkbox(
+            "Match historical setups by time bucket",
+            value=False,
+            disabled=granularity not in ("D", "H4"),
+            help=(
+                "Daily: use only historical setups whose B candle is on the same weekday "
+                "as the current B candle. H4: use only historical setups whose B candle "
+                "starts in the same 4-hour slot as the current B candle. Other timeframes are unchanged."
+            ),
         )
         history_bars = st.slider(
             "OANDA Candles to Load", 200, 5000, 5000, step=100,
@@ -550,6 +592,7 @@ def main():
                 scan_one_symbol,
                 token, account_id, environment, d, granularity, int(history_bars),
                 include_color, int(daily_alignment), alignment_timezone, weekly_alignment,
+                time_filter_enabled,
             )
             futures[f] = d["name"]
 
