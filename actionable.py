@@ -76,48 +76,118 @@ def strat_states(df,mintick):
     out[1:]=s; return out
 
 
-def evaluate_from_c(df, i):
-    """A=i-2, B=i-1, C=i. First B-side break is entry; opposite B side SL; A same-side extreme TP.
-    Uses selected-TF OHLC. Conservative outcome rule: once direction is known, any bar that reaches SL is a Loss, including bars that also reach TP.
-    """
-    a=df.iloc[i-2]; b=df.iloc[i-1]; c=df.iloc[i]
-    long_valid=a.high>b.high
-    short_valid=a.low<b.low
-    up=c.high>b.high; dn=c.low<b.low
-    if not up and not dn: return "No trigger",None,None
-    if up and dn: return "Ambiguous entry",None,None
-    direction="Long" if up else "Short"
-    if direction=="Long" and not long_valid:return "Invalid target",direction,None
-    if direction=="Short" and not short_valid:return "Invalid target",direction,None
-    entry=b.high if direction=="Long" else b.low
-    sl=b.low if direction=="Long" else b.high
-    tp=a.high if direction=="Long" else a.low
-    # Entry occurs during C. From that point, same C may hit TP or SL.
-    # If both are present in C range, ordering is unknown at selected TF.
-    if direction=="Long":
-        hit_tp=c.high>=tp; hit_sl=c.low<=sl
-    else:
-        hit_tp=c.low<=tp; hit_sl=c.high>=sl
-    if hit_sl:return "Loss",direction,(entry,sl,tp)
-    if hit_tp:return "Win",direction,(entry,sl,tp)
-    for j in range(i+1,len(df)):
-        x=df.iloc[j]
-        if direction=="Long": ht=x.high>=tp; hs=x.low<=sl
-        else: ht=x.low<=tp; hs=x.high>=sl
-        if hs:return "Loss",direction,(entry,sl,tp)
-        if ht:return "Win",direction,(entry,sl,tp)
-    return "Open",direction,(entry,sl,tp)
+def evaluate_bar_ohlc(b_high, b_low, a_high, a_low, c_high, c_low):
+    """Same selected-timeframe entry/outcome rule used by the scanner."""
+    up = c_high > b_high
+    dn = c_low < b_low
+    if not up and not dn:
+        return 0, 0
+    if up and dn:
+        return 0, 2
+
+    direction = 1 if up else -1
+    valid = a_high > b_high if direction == 1 else a_low < b_low
+    if not valid:
+        return direction, 4
+
+    sl = b_low if direction == 1 else b_high
+    tp = a_high if direction == 1 else a_low
+    hit_tp = c_high >= tp if direction == 1 else c_low <= tp
+    hit_sl = c_low <= sl if direction == 1 else c_high >= sl
+
+    # Conservative scanner rule: SL has priority inside one selected-TF bar.
+    if hit_sl:
+        return direction, -1
+    if hit_tp:
+        return direction, 1
+    return direction, 3
 
 
-def discover_symbol(df,symbol,mintick):
-    df=df[df.complete].copy().reset_index(drop=True)
-    states=strat_states(df,mintick)
-    rows=[]
-    for i in range(2,len(df)):
-        A=str(states[i-2]); B=str(states[i-1]); C=str(states[i])
-        if "N/A" in (A,B,C):continue
-        outcome,direction,levels=evaluate_from_c(df,i)
-        rows.append({"Symbol":symbol,"A":A,"B":B,"C":C,"Setup":f"{A} ➔ {B}","Triggered C":C,"Direction":direction or "—","Outcome":outcome,"Candle C Time":df.time.iloc[i]})
+def resolve_active_ohlc(direction, sl, tp, h, l):
+    """Resolve a previously opened trade exactly like the scanner."""
+    hit_tp = h >= tp if direction == 1 else l <= tp
+    hit_sl = l <= sl if direction == 1 else h >= sl
+    if hit_sl:
+        return -1
+    if hit_tp:
+        return 1
+    return 0
+
+
+def discover_symbol(df, symbol, mintick):
+    """Replay all occurrences using the scanner's active-trade counting method."""
+    df = df[df.complete].copy().reset_index(drop=True)
+    states = strat_states(df, mintick)
+    n = len(df)
+    if n < 4:
+        return pd.DataFrame()
+
+    highs = df.high.to_numpy(float)
+    lows = df.low.to_numpy(float)
+    active = []
+    rows = []
+
+    for c_idx in range(2, n):
+        # Resolve every previously opened trade first.
+        keep = []
+        for tr in active:
+            result = resolve_active_ohlc(
+                tr["dir"], tr["sl"], tr["tp"], highs[c_idx], lows[c_idx]
+            )
+            if result == 1:
+                tr["row"]["Outcome"] = "Win"
+            elif result == -1:
+                tr["row"]["Outcome"] = "Loss"
+            else:
+                keep.append(tr)
+        active = keep
+
+        # Then allow this same candle to create another A->B->C occurrence.
+        a_idx, b_idx = c_idx - 2, c_idx - 1
+        A = str(states[a_idx])
+        B = str(states[b_idx])
+        C = str(states[c_idx])
+        if "N/A" in (A, B, C):
+            continue
+
+        direction, code = evaluate_bar_ohlc(
+            highs[b_idx], lows[b_idx], highs[a_idx], lows[a_idx],
+            highs[c_idx], lows[c_idx]
+        )
+
+        side = "Long" if direction == 1 else ("Short" if direction == -1 else "—")
+        outcome = {
+            0: "No trigger",
+            1: "Win",
+            -1: "Loss",
+            2: "Ambiguous entry",
+            3: "Open",
+            4: "Invalid target",
+        }[code]
+
+        row = {
+            "Symbol": symbol,
+            "A": A,
+            "B": B,
+            "C": C,
+            "Setup": f"{A} ➔ {B}",
+            "Triggered C": C,
+            "Direction": side,
+            "Outcome": outcome,
+            "Candle C Time": df.time.iloc[c_idx],
+        }
+        rows.append(row)
+
+        # Track every open occurrence independently. Multiple simultaneous
+        # trades, including the same setup/direction, are allowed.
+        if code == 3:
+            active.append({
+                "dir": direction,
+                "sl": lows[b_idx] if direction == 1 else highs[b_idx],
+                "tp": highs[a_idx] if direction == 1 else lows[a_idx],
+                "row": row,
+            })
+
     return pd.DataFrame(rows)
 
 
@@ -135,7 +205,7 @@ def aggregate(raw,min_trades):
 def main():
     st.set_page_config(page_title="The Strat Actionable Pattern Discovery",layout="wide")
     st.title("The Strat — Actionable Pattern Discovery")
-    st.caption("A and B define the setup. C is actionable: first break of B enters; opposite side of B is SL; same-side extreme of A is TP.")
+    st.caption("A and B define the setup. C is actionable: a one-sided break of B enters; opposite side of B is SL; same-side extreme of A is TP. Historical outcomes use the scanner active-trade replay method.")
     token0,env0=credentials()
     with st.sidebar:
         env=st.selectbox("Environment",["Practice","Live"],index=0 if not str(env0).lower().startswith("live") else 1)
@@ -158,7 +228,7 @@ def main():
         alignment_timezone=st.text_input("Alignment timezone","America/New_York")
         weekly_alignment=st.selectbox("Weekly alignment",["Friday","Saturday","Sunday","Monday"],index=0)
         run=st.button("Discover actionable patterns",type="primary",width="stretch")
-    st.info("Entry direction is not guessed when the actionable candle breaks both sides of B. Once direction is known, the outcome rule is conservative: if any selected-timeframe bar reaches SL, it is counted as a Loss even when that same bar also reaches TP. Lower-timeframe ordering is not used in this version.")
+    st.info("Historical counting now matches the scanner: all triggered occurrences are tracked independently, including multiple simultaneous open trades. Each new candle resolves all prior active trades before evaluating a new C. A C that breaks both sides of B is non-directional and excluded. SL has priority when TP and SL occur in the same selected-timeframe candle.")
     if not run:return
     if not syms:st.warning("Select at least one symbol.");return
     meta=inst.set_index("name").to_dict("index")
