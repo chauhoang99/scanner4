@@ -396,6 +396,72 @@ def actionable_stats_for_pattern(
     return rows
 
 
+def next_bar_type_stats(
+    df: pd.DataFrame, states: np.ndarray, pattern: Dict, history_bars: int,
+    day_filter: Optional[int] = None, intraday_hour_filter: Optional[int] = None,
+) -> Dict:
+    """
+    Historical distribution of the bar immediately after a matching A/B setup.
+
+    Type 1 is included when choosing the single highest-probability next bar type,
+    but is ignored for the summed green-bar probability.
+
+    Explicit green v7 states are: 2UG, 2DG, 3G.
+    Color-neutral H/SS states are not assumed to be green.
+    """
+    n = len(df)
+    if n < 4:
+        return {"Next Bar": "N/A", "Green Sum %": np.nan}
+
+    first_c = max(2, n - int(history_bars))
+    last_c = n - 1
+    counts: Dict[str, int] = {}
+    total = 0
+
+    for c_idx in range(first_c, last_c + 1):
+        a_idx, b_idx = c_idx - 2, c_idx - 1
+        if a_idx < 1:
+            continue
+
+        a_state = str(states[a_idx])
+        b_state = str(states[b_idx])
+        if not pattern_matches(a_state, b_state, pattern):
+            continue
+
+        b_time = pd.Timestamp(df.loc[b_idx, "time"])
+        if day_filter is not None and b_time.dayofweek != int(day_filter):
+            continue
+        if intraday_hour_filter is not None and b_time.hour != int(intraday_hour_filter):
+            continue
+
+        c_state = str(states[c_idx])
+        if c_state == "N/A":
+            continue
+
+        counts[c_state] = counts.get(c_state, 0) + 1
+        total += 1
+
+    if total == 0:
+        return {"Next Bar": "N/A", "Green Sum %": np.nan}
+
+    # Deterministic tie-break: first state in the exact v7 vocabulary order below.
+    state_order = ["1", "2UG", "2UR", "2DG", "2DR", "2-H", "2-SS", "3G", "3R", "3-H", "3-SS"]
+    best_state = max(
+        state_order,
+        key=lambda state: (counts.get(state, 0), -state_order.index(state))
+    )
+    best_probability = 100.0 * counts.get(best_state, 0) / total
+
+    green_states = {"2UG", "2DG", "3G"}
+    green_count = sum(counts.get(state, 0) for state in green_states)
+    green_probability = 100.0 * green_count / total
+
+    return {
+        "Next Bar": f"{best_state} ({best_probability:.2f}%)",
+        "Green Sum %": green_probability,
+    }
+
+
 def scan_one_symbol(
     token, account_id, environment, instrument_row, granularity, history_bars,
     include_color, daily_alignment, alignment_timezone, weekly_alignment,
@@ -438,6 +504,10 @@ def scan_one_symbol(
         base, states, found["pattern"], history_bars,
         day_filter=day_filter, intraday_hour_filter=intraday_hour_filter,
     )
+    next_bar_stats = next_bar_type_stats(
+        base, states, found["pattern"], history_bars,
+        day_filter=day_filter, intraday_hour_filter=intraday_hour_filter,
+    )
     out = []
     for s in stats_rows:
         out.append({
@@ -446,6 +516,7 @@ def scan_one_symbol(
             "A": found["a_state"],
             "B": found["b_state"],
             **s,
+            **next_bar_stats,
             "B Candle Time": base.loc[last_closed, "time"],
             "Time Filter": (
                 pd.Timestamp(base.loc[last_closed, "time"]).day_name()
@@ -626,6 +697,7 @@ def main():
 
     display_df = result_df.copy()
     display_df["Success %"] = display_df["Success %"].map(lambda x: "N/A" if pd.isna(x) else f"{x:.2f}%")
+    display_df["Green Sum %"] = display_df["Green Sum %"].map(lambda x: "N/A" if pd.isna(x) else f"{x:.2f}%")
     display_df["B Candle Time"] = pd.to_datetime(display_df["B Candle Time"], utc=True).dt.strftime("%Y-%m-%d %H:%M UTC")
 
     st.subheader("Latest actionable setups — all OANDA Forex symbols")
