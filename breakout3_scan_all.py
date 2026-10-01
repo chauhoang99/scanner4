@@ -1,5 +1,6 @@
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, time, timezone
 
 import pandas as pd
 import requests
@@ -65,16 +66,25 @@ def fetch_oanda_instruments(token, environment, account_id):
     items.sort(key=lambda x: (x.get("type", ""), x.get("displayName", x.get("name", ""))))
     return items
 
-def fetch_candles(token, environment, instrument, granularity, count=80):
+def fetch_candles(token, environment, instrument, granularity, count=80, end_time=None):
     url = f"{oanda_host(environment)}/v3/instruments/{instrument}/candles"
+
+    params = {
+        "price": "M",
+        "granularity": granularity,
+        "count": min(int(count), 5000),
+    }
+
+    # Historical mode: ask OANDA for candles ending at/before this UTC point.
+    # Using `to` + `count` prevents candles after the selected backtest time
+    # from entering the scan.
+    if end_time is not None:
+        params["to"] = end_time.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
     r = requests.get(
         url,
         headers={"Authorization": f"Bearer {token}"},
-        params={
-            "price": "M",
-            "granularity": granularity,
-            "count": min(int(count), 5000),
-        },
+        params=params,
         timeout=30,
     )
     if not r.ok:
@@ -190,8 +200,10 @@ def find_recent_breakout(df, enabled, forward_window, recent_bars):
     return max(matches, key=lambda x: x["breakoutIndex"])
 
 def scan_one(token, environment, instrument, granularity, candle_count,
-             enabled, forward_window, recent_bars):
-    df = fetch_candles(token, environment, instrument, granularity, candle_count)
+             enabled, forward_window, recent_bars, end_time=None):
+    df = fetch_candles(
+        token, environment, instrument, granularity, candle_count, end_time=end_time
+    )
     hit = find_recent_breakout(df, enabled, forward_window, recent_bars)
     return instrument, df, hit
 
@@ -277,7 +289,7 @@ def breakout_chart(df, hit, instrument, tf):
 st.title("OANDA Recent Range Breakout Scanner")
 st.caption(
     "Scans all OANDA instruments for OB / EB / OEB setup ranges whose first "
-    "closing-price breakout occurred within the latest completed bars."
+    "closing-price breakout occurred within the selected endpoint's recent completed bars."
 )
 
 with st.sidebar:
@@ -301,6 +313,28 @@ with st.sidebar:
         index=list(OANDA_GRANULARITY).index("D1"),
         horizontal=True,
     )
+
+    scan_mode = st.radio(
+        "Scan mode",
+        ["Latest", "Historical"],
+        horizontal=True,
+        help="Historical mode makes the selected UTC time the scanner's endpoint.",
+    )
+
+    historical_end = None
+    if scan_mode == "Historical":
+        hist_date = st.date_input(
+            "Historical end date (UTC)",
+            value=pd.Timestamp.now(tz="UTC").date(),
+        )
+        hist_time = st.time_input(
+            "Historical end time (UTC)",
+            value=time(23, 59),
+            step=60,
+        )
+        historical_end = datetime.combine(
+            hist_date, hist_time, tzinfo=timezone.utc
+        )
 
     enabled = st.multiselect(
         "Range pattern types",
@@ -355,6 +389,12 @@ st.caption(
     "breakouts require a candle close beyond the setup range"
 )
 
+if scan_mode == "Historical":
+    st.info(
+        f"Historical endpoint: **{historical_end.strftime('%Y-%m-%d %H:%M UTC')}**. "
+        "Candles after this point are not fetched or used."
+    )
+
 if not scan:
     st.info("Choose the timeframe/settings and click **Scan All Instruments**.")
     st.stop()
@@ -382,6 +422,7 @@ with ThreadPoolExecutor(max_workers=max_workers) as executor:
             set(enabled),
             forward_window,
             recent_bars,
+            historical_end,
         ): instrument
         for instrument in all_instruments
     }
@@ -417,7 +458,7 @@ st.subheader(f"Matches: {len(hits)}")
 if not hits:
     st.warning(
         f"No range breakouts were found within the last {recent_bars} completed {tf} bars "
-        f"using the selected setup types."
+        f"before the selected endpoint using the selected setup types."
     )
 else:
     summary_rows = []
@@ -479,6 +520,11 @@ with st.expander("Scanner definition"):
 - The first breakout of each setup is used.
 - It must occur within the selected **breakout window** after the setup.
 - It must also be within the latest **{recent_bars} completed bars**.
+
+**Historical mode**
+- The selected UTC date/time is used as the OANDA candle request's end point.
+- Candles after that point are not fetched, so the scan cannot use future bars.
+- "Last N bars" means the last N completed candles available at that historical endpoint.
 
 **Display**
 - Every matching instrument is listed.
